@@ -1,17 +1,28 @@
-import type { Metadata } from "next";
-import Link from "next/link";
+import type { Metadata, Viewport } from "next";
+import { Inter, Space_Grotesk, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
+import { Providers } from "@/components/providers";
+import { BottomNav } from "@/components/shell/BottomNav";
+
+const inter = Inter({ subsets: ["latin"], variable: "--font-sans" });
+const display = Space_Grotesk({ subsets: ["latin"], variable: "--font-display" });
+const mono = JetBrains_Mono({ subsets: ["latin"], variable: "--font-mono" });
 
 export const metadata: Metadata = {
   title: "Hyperthrophy",
-  description: "Browse exercises and track your hypertrophy training.",
+  description: "Personal hypertrophy training tracker.",
+  manifest: "/manifest.webmanifest",
+  appleWebApp: { capable: true, statusBarStyle: "black-translucent", title: "Hyperthrophy" },
 };
 
-const nav = [
-  { href: "/", label: "Home" },
-  { href: "/exercises", label: "Exercises" },
-  { href: "/workouts", label: "Workouts" },
-];
+export const viewport: Viewport = {
+  themeColor: "#0C0A09",
+  width: "device-width",
+  initialScale: 1,
+  maximumScale: 1,
+  userScalable: false,
+  viewportFit: "cover",
+};
 
 export default function RootLayout({
   children,
@@ -19,40 +30,12 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en">
-      <body className="min-h-screen">
-        <header className="sticky top-0 z-20 border-b border-[var(--border)] bg-[var(--background)]/90 backdrop-blur">
-          <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-3">
-            <Link href="/" className="flex items-center gap-2 font-bold tracking-tight">
-              <span className="text-xl">🏋️</span>
-              <span>
-                hyper<span className="text-brand-500">throphy</span>
-              </span>
-            </Link>
-            <nav className="flex items-center gap-1">
-              {nav.map((n) => (
-                <Link
-                  key={n.href}
-                  href={n.href}
-                  className="rounded-lg px-3 py-1.5 text-sm text-[var(--muted)] hover:bg-[var(--surface-2)] hover:text-[var(--text)]"
-                >
-                  {n.label}
-                </Link>
-              ))}
-            </nav>
-          </div>
-        </header>
-        <main className="mx-auto max-w-6xl px-4 py-8">{children}</main>
-        <footer className="border-t border-[var(--border)] py-6 text-center text-xs text-[var(--muted)]">
-          Exercise data from the open-source{" "}
-          <a
-            href="https://github.com/exercemus/exercises"
-            className="underline hover:text-[var(--text)]"
-          >
-            exercemus
-          </a>{" "}
-          dataset.
-        </footer>
+    <html lang="en" className={`${inter.variable} ${display.variable} ${mono.variable}`}>
+      <body className="ambient min-h-screen font-sans antialiased">
+        <Providers>
+          <div className="mx-auto max-w-xl px-4 pb-28 pt-6">{children}</div>
+          <BottomNav />
+        </Providers>
       </body>
     </html>
   );

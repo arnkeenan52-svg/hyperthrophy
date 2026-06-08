@@ -2,42 +2,85 @@
 @tailwind components;
 @tailwind utilities;
 
-:root {
-  --background: #0b0f17;
-  --surface: #131a26;
-  --surface-2: #1b2536;
-  --border: #25314a;
-  --text: #e6edf6;
-  --muted: #8a97ad;
-}
+@layer base {
+  :root {
+    /* EMBER theme — warm dark, default */
+    --background: 28 24% 4%; /* warm near-black charcoal */
+    --foreground: 35 20% 95%;
 
-html {
-  color-scheme: dark;
-}
+    --surface: 30 18% 8%;
+    --surface-2: 30 14% 12%;
 
-body {
-  background: var(--background);
-  color: var(--text);
-  -webkit-font-smoothing: antialiased;
+    --muted: 30 10% 16%;
+    --muted-foreground: 32 12% 62%;
+
+    --border: 32 14% 18%;
+    --input: 32 14% 20%;
+    --ring: 24 100% 55%;
+
+    --radius: 0.85rem;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    /* prevent iOS rubber-band flash on dark bg */
+    background-attachment: fixed;
+  }
+
+  /* Bigger tap targets + no text selection on tappable controls */
+  button,
+  [role="button"] {
+    touch-action: manipulation;
+  }
 }
 
 @layer components {
   .card {
-    @apply rounded-xl border border-[var(--border)] bg-[var(--surface)];
+    @apply rounded-2xl border border-border bg-surface;
   }
-  .btn {
-    @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50;
+  .card-2 {
+    @apply rounded-2xl border border-border bg-surface-2;
   }
-  .btn-primary {
-    @apply btn bg-brand-600 text-white hover:bg-brand-500;
+  .stat-num {
+    @apply font-mono tabular-nums tracking-tight;
   }
-  .btn-ghost {
-    @apply btn border border-[var(--border)] bg-[var(--surface-2)] text-[var(--text)] hover:border-brand-500;
+  .glass {
+    @apply border border-white/5 bg-surface/80 backdrop-blur-xl;
   }
-  .input {
-    @apply w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2 text-sm text-[var(--text)] placeholder:text-[var(--muted)] focus:border-brand-500 focus:outline-none;
+  /* subtle ambient warmth at the top of the app */
+  .ambient {
+    background:
+      radial-gradient(60% 40% at 50% -10%, rgba(255, 122, 26, 0.08), transparent 70%);
   }
-  .chip {
-    @apply inline-flex items-center rounded-full border border-[var(--border)] bg-[var(--surface-2)] px-2.5 py-0.5 text-xs text-[var(--muted)];
+}
+
+/* Hide number input spinners for cleaner mono readouts */
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type="number"] {
+  -moz-appearance: textfield;
+}
+
+/* Respect reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }

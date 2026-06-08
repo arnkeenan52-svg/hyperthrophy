@@ -1,69 +1,70 @@
-# hyperthrophy
+# Hyperthrophy
 
-A focused **hypertrophy training** web app: browse a database of 800+ exercises
-and log your sets and reps to drive progressive overload.
+A personal, **local-first** hypertrophy training tracker — pre-loaded with my
+exact 5-day program, lifts, and intensity rules. Open it, log my training, track
+progress. No accounts, no server, no setup; data lives on my device.
 
-Built with **Next.js (App Router) · TypeScript · Prisma · SQLite · Tailwind CSS**.
+Built with **Next.js (App Router) · TypeScript · Tailwind (shadcn-style UI) ·
+Dexie/IndexedDB · Recharts · Framer Motion**, installable as a **PWA** that works
+offline.
 
-## Features
+## Highlights
 
-- **Exercise database** — 872 exercises seeded from the open-source
-  [exercemus](https://github.com/exercemus/exercises) dataset.
-  - Search by name, filter by muscle group, category, and equipment.
-  - Detail pages with instructions, primary/secondary muscles, tips, and a
-    video demonstration where available.
-- **Workout tracker** — create training sessions, add exercises, and log each
-  working set (weight × reps). Per-exercise and total **volume** is computed
-  automatically.
+- **Ships ready to lift.** First launch seeds my profile, the 5-day split, my
+  current lifts, and an 800+ exercise library — start logging Day 1 immediately.
+- **Fast set logging** — big mono inputs, one-tap set completion with haptics, a
+  per-exercise rest timer that auto-starts at the prescribed rest.
+- **Progressive-overload engine** — after each exercise it suggests next
+  session's weight (barbell +2.5kg · dumbbell +2kg · machine/cable +5kg) and
+  pre-fills it with an acceptable "+2.5kg suggested" hint.
+- **RIR / intensity cues** — most sets 1–2 RIR, last set 0 RIR allowed; big
+  compounds (Bench/Squat/Row) are capped at 1 RIR with a clear "never to failure"
+  reminder.
+- **Progress dashboard** — weekly volume, estimated 1RM per lift (pull lifts
+  highlighted), bodyweight trend, a 12-week training heatmap, and PRs. A
+  **pull-focus** card tracks back/pull volume vs pressing — my main goal.
+- **No deadlifts, anywhere** — excluded from plans, suggestions, and the library.
+- **Backup** — JSON export/import for safekeeping.
+
+## Pages
+
+`Home` dashboard · `Session` (log today) · `Plans` (view/edit the split) ·
+`Progress` (charts & history) · `Library` (exercise database) ·
+`Profile / My Protocol` (stats, lifts, nutrition & sleep reference, settings).
 
 ## Getting started
 
 ```bash
-npm install            # install dependencies
-npm run db:reset       # create the SQLite schema and seed exercises
-npm run dev            # start the dev server at http://localhost:3000
+npm install
+npm run dev      # http://localhost:3000
 ```
 
-### Useful scripts
+The database seeds itself in the browser on first load. To reset, clear the
+site's IndexedDB (or use a fresh profile).
 
-| Script              | Description                                      |
-| ------------------- | ------------------------------------------------ |
-| `npm run dev`       | Start the Next.js dev server                     |
-| `npm run build`     | Generate the Prisma client and build for prod    |
-| `npm run start`     | Run the production build                         |
-| `npm run db:push`   | Sync the Prisma schema to the database           |
-| `npm run db:seed`   | Seed exercises from `data/exercises.json`        |
-| `npm run db:reset`  | Reset the database and reseed                     |
-
-## Project structure
-
-```
-app/                     # Next.js App Router pages
-  page.tsx               # dashboard
-  exercises/             # exercise list + detail
-  workouts/              # workout list + detail (logging)
-components/              # client UI (filters, pickers, set logging)
-lib/
-  prisma.ts              # Prisma client singleton
-  exercises.ts           # slug/parsing helpers, muscle groups
-  actions.ts             # server actions for workout mutations
-prisma/
-  schema.prisma          # Exercise, Workout, WorkoutEntry, SetLog
-  seed.ts                # dataset importer
-data/exercises.json      # bundled exercise dataset
+```bash
+npm run build && npm start   # production
+npm run verify               # logic + data-model checks
+npm run verify:db            # seeds against the real dataset (fake-indexeddb)
 ```
 
-## Data model
+## Architecture
 
-- `Exercise` — name, slug, category, description, equipment, muscles,
-  instructions, tips, video. List fields are stored as JSON strings for
-  SQLite compatibility (parsed via `lib/exercises.ts`).
-- `Workout` → `WorkoutEntry` → `SetLog` — a session contains exercises, each
-  with logged sets.
+- **`lib/db/`** — Dexie schema (`types.ts`) and seeding (`index.ts`). Stores:
+  `profile`, `bodyweight`, `exercises`, `plans`/`planExercises`,
+  `sessions`/`sessionExercises`/`setLogs`, `oneRmRefs`, `settings`,
+  `protocolDays`.
+- **`lib/engine/`** — pure training logic: `overload.ts`, `rir.ts`,
+  `oneRepMax.ts` (Brzycki), `stats.ts` (volume, streaks, PRs, pull/press
+  balance). Fully unit-tested in `scripts/verify.ts`.
+- **`lib/data/program.ts`** — my 5-day split, seed lifts, and 1RM references.
+- **`lib/session.ts`** — session lifecycle + overload-aware weight suggestions.
+- **`components/`** — `ui/` primitives, `session/`, `progress/`, `shell/`.
 
 ## Data attribution
 
-Exercise data is from the open-source
-[exercemus/exercises](https://github.com/exercemus/exercises) project, itself
-curated from [wger](https://github.com/wger-project/wger) and
-[exercises.json](https://github.com/wrkout/exercises.json).
+Exercise library from the open-source
+[exercemus/exercises](https://github.com/exercemus/exercises) dataset (curated
+from wger and exercises.json). Design and patterns informed by
+[workout-cool](https://github.com/Snouzy/workout-cool) and
+[wger](https://github.com/wger-project/wger).
