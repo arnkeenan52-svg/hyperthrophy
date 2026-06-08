@@ -1,0 +1,69 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+/// A single exercise sourced from the open exercemus dataset.
+/// List-valued fields (equipment, muscles, instructions, tips, images)
+/// are stored as JSON-encoded strings for SQLite compatibility.
+model Exercise {
+  id               Int      @id @default(autoincrement())
+  slug             String   @unique
+  name             String
+  category         String
+  description      String?
+  equipment        String   @default("[]")
+  primaryMuscles   String   @default("[]")
+  secondaryMuscles String   @default("[]")
+  instructions     String   @default("[]")
+  tips             String   @default("[]")
+  video            String?
+  images           String   @default("[]")
+
+  entries WorkoutEntry[]
+
+  @@index([category])
+  @@index([name])
+}
+
+/// A logged training session.
+model Workout {
+  id        Int      @id @default(autoincrement())
+  name      String
+  date      DateTime @default(now())
+  notes     String?
+  createdAt DateTime @default(now())
+
+  entries WorkoutEntry[]
+}
+
+/// An exercise performed within a workout, holding its logged sets.
+model WorkoutEntry {
+  id         Int @id @default(autoincrement())
+  workoutId  Int
+  exerciseId Int
+  order      Int @default(0)
+
+  workout  Workout  @relation(fields: [workoutId], references: [id], onDelete: Cascade)
+  exercise Exercise @relation(fields: [exerciseId], references: [id])
+  sets     SetLog[]
+
+  @@index([workoutId])
+}
+
+/// One working set: weight x reps.
+model SetLog {
+  id      Int    @id @default(autoincrement())
+  entryId Int
+  order   Int    @default(0)
+  weight  Float?
+  reps    Int?
+
+  entry WorkoutEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
+
+  @@index([entryId])
+}
