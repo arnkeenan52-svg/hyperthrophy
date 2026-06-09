@@ -36,6 +36,9 @@ jobs:
       - name: Verify DB seeding (real dataset)
         run: npm run verify:db
 
+      - name: Verify Apple Health parser
+        run: npm run verify:health
+
   e2e:
     name: E2E (browser)
     runs-on: ubuntu-latest

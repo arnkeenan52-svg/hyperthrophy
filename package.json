@@ -9,14 +9,10 @@
     "lint": "next lint",
     "verify": "tsx scripts/verify.ts",
     "verify:db": "node --import tsx scripts/verify-db.ts",
-    "e2e": "node scripts/e2e-pages.mjs",
-    "cap:build": "CAP=1 next build",
-    "cap:sync": "CAP=1 next build && cap sync ios",
-    "cap:ios": "cap open ios"
+    "verify:health": "tsx scripts/verify-health.ts",
+    "e2e": "node scripts/e2e-pages.mjs"
   },
   "dependencies": {
-    "@capacitor/core": "^8.4.0",
-    "@capacitor/ios": "^8.4.0",
     "@ducanh2912/next-pwa": "^10.2.9",
     "@radix-ui/react-dialog": "^1.1.6",
     "@radix-ui/react-label": "^2.1.2",
@@ -31,6 +27,7 @@
     "clsx": "^2.1.1",
     "dexie": "^4.0.11",
     "dexie-react-hooks": "^1.1.7",
+    "fflate": "^0.8.3",
     "framer-motion": "^12.4.0",
     "lucide-react": "^0.474.0",
     "motion": "^12.40.0",
@@ -44,7 +41,6 @@
     "vaul": "^1.1.2"
   },
   "devDependencies": {
-    "@capacitor/cli": "^8.4.0",
     "@types/node": "^22.10.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",

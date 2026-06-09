@@ -53,6 +53,7 @@ try {
   ok("profile has Best lifts", (await page.getByRole("heading", { name: /best lifts/i }).count()) > 0);
   ok("profile has Stats (e1RM tile)", (await page.getByText(/top e1rm/i).count()) > 0);
   ok("profile has Health section", (await page.getByRole("heading", { name: /^health$/i }).count()) > 0);
+  ok("Apple Health import button present", (await page.getByRole("button", { name: /import apple health/i }).count()) > 0);
   ok("profile nutrition editable (Protein)", (await page.getByText(/protein/i).count()) > 0);
 
   // add a best lift
