@@ -4,14 +4,14 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "@/lib/utils";
 
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-xl text-sm font-medium transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 active:scale-[0.98] [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
+  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-xl font-display text-base font-semibold tracking-wide transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 active:scale-[0.98] [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
   {
     variants: {
       variant: {
         default:
-          "bg-ember text-black font-semibold shadow-[0_4px_20px_-4px_rgba(255,122,26,0.5)] hover:bg-ember-400",
+          "bg-ember text-black font-bold uppercase tracking-wide shadow-[0_4px_24px_-4px_rgba(191,255,0,0.55)] hover:bg-ember-300",
         current:
-          "bg-current text-black font-semibold shadow-[0_4px_20px_-4px_rgba(45,212,191,0.5)] hover:bg-current-400",
+          "bg-current text-black font-bold uppercase tracking-wide shadow-[0_4px_24px_-4px_rgba(0,229,255,0.5)] hover:bg-current-400",
         secondary:
           "border border-border bg-surface-2 text-foreground hover:border-ember/50",
         ghost: "text-muted-foreground hover:bg-surface-2 hover:text-foreground",

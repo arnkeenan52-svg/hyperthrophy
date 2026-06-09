@@ -16,11 +16,11 @@ const dayLabel: Record<DayType, string> = {
   LEGS_VOLUME: "Legs",
 };
 const dayAccent: Record<DayType, string> = {
-  UPPER_HEAVY: "#ff7a1a",
-  LOWER_HEAVY: "#3b82f6",
-  PUSH_VOLUME: "#fb7185",
-  PULL_VOLUME: "#2dd4bf",
-  LEGS_VOLUME: "#a78bfa",
+  UPPER_HEAVY: "#bfff00", // volt
+  LOWER_HEAVY: "#00e5ff", // cyan
+  PUSH_VOLUME: "#ff2d9b", // magenta
+  PULL_VOLUME: "#9d5cff", // violet
+  LEGS_VOLUME: "#ffb020", // amber
 };
 
 export function WorkoutGuide() {
@@ -88,11 +88,11 @@ export function WorkoutGuide() {
   return (
     <div className="space-y-5 animate-fade-up">
       <header>
-        <p className="text-xs font-semibold uppercase tracking-[0.22em] text-ember/80">
+        <p className="text-xs font-semibold uppercase tracking-[0.28em] text-ember">
           12-Week Program
         </p>
-        <h1 className="font-display text-4xl font-bold uppercase leading-none tracking-tight">
-          Workout
+        <h1 className="font-poster text-7xl uppercase leading-[0.85] tracking-tight">
+          Work<span className="text-ember">out</span>
         </h1>
       </header>
 
@@ -169,10 +169,11 @@ export function WorkoutGuide() {
       {/* Day footer */}
       <div className="flex items-center justify-between rounded-2xl border border-white/[0.07] bg-surface px-4 py-3">
         <div>
-          <p className="stat-num text-lg font-bold">
-            {doneSets}<span className="text-muted-foreground">/{totalSets}</span>
+          <p className="font-poster text-3xl leading-none">
+            <span className={doneSets === totalSets && totalSets > 0 ? "text-ember" : ""}>{doneSets}</span>
+            <span className="text-muted-foreground">/{totalSets}</span>
           </p>
-          <p className="text-xs text-muted-foreground">sets done · Day {(plans.findIndex((p) => p.id === activeDay?.id) + 1)} · Week {week}</p>
+          <p className="text-xs uppercase tracking-wide text-muted-foreground">sets done · Day {(plans.findIndex((p) => p.id === activeDay?.id) + 1)} · Week {week}</p>
         </div>
         <button
           onClick={resetDay}
@@ -237,7 +238,7 @@ function ExerciseRow({
               className={cn(
                 "flex size-11 items-center justify-center rounded-xl border text-sm font-semibold transition-all active:scale-90",
                 checked
-                  ? "border-transparent bg-ember text-black shadow-[0_4px_16px_-6px_rgba(255,122,26,0.7)]"
+                  ? "border-transparent bg-ember text-black shadow-[0_4px_16px_-6px_rgba(191,255,0,0.8)]"
                   : "border-white/10 bg-surface-2 text-muted-foreground",
               )}
             >

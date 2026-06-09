@@ -59,7 +59,7 @@ export default function ProfilePage() {
   return (
     <div className="space-y-5 animate-fade-up">
       <header>
-        <h1 className="font-display text-2xl font-bold">Profile</h1>
+        <h1 className="font-poster text-6xl uppercase leading-[0.85] tracking-tight">Pro<span className="text-ember">file</span></h1>
         <p className="text-sm text-muted-foreground">Your stats, lifts & protocol</p>
       </header>
 

@@ -10,8 +10,10 @@ const config: Config = {
   theme: {
     extend: {
       fontFamily: {
+        // Body: Barlow. Headings/labels: Barlow Condensed. Poster: Bebas Neue.
         sans: ["var(--font-sans)", "system-ui", "sans-serif"],
-        display: ["var(--font-display)", "system-ui", "sans-serif"],
+        display: ["var(--font-display)", "var(--font-sans)", "sans-serif"],
+        poster: ["var(--font-poster)", "var(--font-display)", "sans-serif"],
         mono: ["var(--font-mono)", "ui-monospace", "monospace"],
       },
       colors: {
@@ -28,28 +30,28 @@ const config: Config = {
           DEFAULT: "hsl(var(--muted))",
           foreground: "hsl(var(--muted-foreground))",
         },
-        // Ember — primary accent (effort, actions, PRs)
+        // VOLT — primary athletic accent (high-energy lime)
         ember: {
-          50: "#fff7ed",
-          100: "#ffedd5",
-          200: "#fed7aa",
-          300: "#fdba74",
-          400: "#fb923c",
-          500: "#ff7a1a",
-          600: "#ea580c",
-          700: "#c2410c",
-          800: "#9a3412",
-          900: "#7c2d12",
-          DEFAULT: "#ff7a1a",
+          50: "#f9ffe5",
+          100: "#efffb8",
+          200: "#e2ff7a",
+          300: "#d4ff3d",
+          400: "#c6ff00",
+          500: "#bfff00",
+          600: "#9fd400",
+          700: "#74a000",
+          800: "#577800",
+          900: "#3f5600",
+          DEFAULT: "#bfff00",
         },
-        // Current — pull/back focus accent
+        // FLUX — electric cyan secondary
         current: {
-          400: "#5eead4",
-          500: "#2dd4bf",
-          600: "#14b8a6",
-          DEFAULT: "#2dd4bf",
+          400: "#5cf0ff",
+          500: "#00e5ff",
+          600: "#00b8cc",
+          DEFAULT: "#00e5ff",
         },
-        gold: "#fbbf24",
+        gold: "#ffb020",
       },
       borderRadius: {
         lg: "var(--radius)",
@@ -63,8 +65,8 @@ const config: Config = {
           "100%": { opacity: "1", transform: "translateY(0)" },
         },
         "ember-pulse": {
-          "0%, 100%": { boxShadow: "0 0 0 0 rgba(255,122,26,0.4)" },
-          "50%": { boxShadow: "0 0 0 8px rgba(255,122,26,0)" },
+          "0%, 100%": { boxShadow: "0 0 0 0 rgba(191,255,0,0.4)" },
+          "50%": { boxShadow: "0 0 0 8px rgba(191,255,0,0)" },
         },
         "colon-blink": {
           "0%, 100%": { opacity: "1" },

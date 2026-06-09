@@ -4,19 +4,19 @@
 
 @layer base {
   :root {
-    /* EMBER theme — warm dark, default */
-    --background: 28 24% 4%; /* warm near-black charcoal */
-    --foreground: 35 20% 95%;
+    /* VOLT theme — cool near-black, high-contrast athletic */
+    --background: 240 9% 4%; /* neutral near-black */
+    --foreground: 0 0% 98%;
 
-    --surface: 30 18% 8%;
-    --surface-2: 30 14% 12%;
+    --surface: 240 7% 8%;
+    --surface-2: 240 6% 12%;
 
-    --muted: 30 10% 16%;
-    --muted-foreground: 32 12% 62%;
+    --muted: 240 6% 16%;
+    --muted-foreground: 240 5% 65%;
 
-    --border: 32 14% 18%;
-    --input: 32 14% 20%;
-    --ring: 24 100% 55%;
+    --border: 240 6% 18%;
+    --input: 240 6% 20%;
+    --ring: 75 100% 50%;
 
     --radius: 0.85rem;
   }
@@ -56,7 +56,8 @@
     background: transparent;
   }
   ::selection {
-    background: rgba(255, 122, 26, 0.25);
+    background: rgba(191, 255, 0, 0.3);
+    color: #0a0a0c;
   }
 }
 
@@ -68,29 +69,31 @@
     @apply rounded-2xl border border-border bg-surface-2;
   }
   .stat-num {
-    @apply font-mono tabular-nums tracking-tight;
+    @apply font-display tabular-nums tracking-tight;
   }
   .glass {
     @apply border border-white/5 bg-surface/70 backdrop-blur-2xl;
   }
-  /* Premium ambient mesh — warm ember up top, cool teal glow lower */
+  /* Athletic ambient — volt up top, cyan glow lower, on a fine grid */
   .ambient {
     position: relative;
     background:
-      radial-gradient(55% 32% at 50% -8%, rgba(255, 122, 26, 0.12), transparent 70%),
-      radial-gradient(40% 30% at 100% 8%, rgba(255, 154, 60, 0.06), transparent 70%),
-      radial-gradient(45% 35% at 0% 40%, rgba(45, 212, 191, 0.05), transparent 70%);
+      radial-gradient(55% 30% at 50% -8%, rgba(191, 255, 0, 0.1), transparent 70%),
+      radial-gradient(45% 35% at 100% 4%, rgba(0, 229, 255, 0.05), transparent 70%),
+      linear-gradient(rgba(255, 255, 255, 0.018) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.018) 1px, transparent 1px);
+    background-size: auto, auto, 40px 40px, 40px 40px;
   }
   /* Glow helpers */
   .glow-ember {
-    box-shadow: 0 8px 40px -12px rgba(255, 122, 26, 0.45);
+    box-shadow: 0 10px 44px -14px rgba(191, 255, 0, 0.55);
   }
   .glow-current {
-    box-shadow: 0 8px 40px -12px rgba(45, 212, 191, 0.4);
+    box-shadow: 0 10px 44px -14px rgba(0, 229, 255, 0.45);
   }
   /* Gradient text accent */
   .text-gradient-ember {
-    @apply bg-gradient-to-br from-ember-300 to-ember-600 bg-clip-text text-transparent;
+    @apply bg-gradient-to-br from-ember-200 to-ember-500 bg-clip-text text-transparent;
   }
   /* Hairline gradient border on premium cards */
   .card-premium {

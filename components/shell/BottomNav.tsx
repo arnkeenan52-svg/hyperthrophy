@@ -38,7 +38,7 @@ export function BottomNav() {
                 <Icon
                   className={cn(
                     "relative size-5",
-                    active && "drop-shadow-[0_0_8px_rgba(255,122,26,0.6)]",
+                    active && "drop-shadow-[0_0_8px_rgba(191,255,0,0.6)]",
                   )}
                 />
                 <span className="relative font-display">{item.label}</span>
