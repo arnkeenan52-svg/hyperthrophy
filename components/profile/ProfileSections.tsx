@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import { toast } from "sonner";
 import {
@@ -9,6 +9,7 @@ import {
   Dumbbell,
   Footprints,
   HeartPulse,
+  Loader2,
   Moon,
   Plus,
   Scale,
@@ -18,6 +19,7 @@ import {
 import { db } from "@/lib/db";
 import { estimate1RM } from "@/lib/engine/oneRepMax";
 import { NUTRITION } from "@/lib/data/protocol";
+import { isNativeHealth, syncFromAppleHealth } from "@/lib/health";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -141,6 +143,24 @@ export function BestLifts() {
 export function HealthCard() {
   const health = useLiveQuery(() => db.health.get("latest"));
   const bw = useLiveQuery(() => db.bodyweight.orderBy("date").last());
+  const [native, setNative] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+
+  useEffect(() => {
+    isNativeHealth() && setNative(true);
+  }, []);
+
+  async function sync() {
+    setSyncing(true);
+    try {
+      await syncFromAppleHealth();
+      toast.success("Synced from Apple Health");
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setSyncing(false);
+    }
+  }
 
   async function save(patch: Partial<{ steps: number | null; sleepH: number | null; restingHr: number | null }>) {
     const cur = (await db.health.get("latest")) ?? {
@@ -173,6 +193,12 @@ export function HealthCard() {
         <Metric label="Sleep" unit="h" defaultValue={health?.sleepH ?? undefined} onSave={(v) => save({ sleepH: num(v) })} step="0.1" />
         <Metric label="Resting HR" unit="bpm" defaultValue={health?.restingHr ?? undefined} onSave={(v) => save({ restingHr: num(v) })} />
       </div>
+      {native && (
+        <Button onClick={sync} disabled={syncing} className="mt-3 w-full">
+          {syncing ? <Loader2 className="size-4 animate-spin" /> : <HeartPulse className="size-4" />}
+          {syncing ? "Syncing…" : "Sync Apple Health"}
+        </Button>
+      )}
     </Card>
   );
 }
