@@ -13,6 +13,9 @@ const TABLES = [
   "settings",
   "protocolDays",
   "checks",
+  "bestLifts",
+  "health",
+  "nutrition",
 ] as const;
 
 /** Export the entire local database as a JSON blob and trigger a download. */

@@ -1,8 +1,11 @@
 import Dexie, { type Table } from "dexie";
 import type {
+  BestLift,
   BodyweightEntry,
   Check,
   Exercise,
+  Health,
+  NutritionTargets,
   OneRmRef,
   Plan,
   PlanExercise,
@@ -47,6 +50,9 @@ class HypertrophyDB extends Dexie {
   settings!: Table<Settings, string>;
   protocolDays!: Table<ProtocolDay, number>;
   checks!: Table<Check, string>;
+  bestLifts!: Table<BestLift, number>;
+  health!: Table<Health, string>;
+  nutrition!: Table<NutritionTargets, string>;
 
   constructor() {
     super("hyperthrophy");
@@ -66,6 +72,12 @@ class HypertrophyDB extends Dexie {
     // v2: set check-offs for the Workout guide.
     this.version(2).stores({
       checks: "key, [week+dayId]",
+    });
+    // v3: best lifts, health metrics, editable nutrition.
+    this.version(3).stores({
+      bestLifts: "++id, name",
+      health: "id",
+      nutrition: "id",
     });
   }
 }

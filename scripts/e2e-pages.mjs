@@ -24,7 +24,7 @@ try {
   ok("home is the Workout guide", (await page.getByRole("heading", { name: /^workout$/i }).count()) > 0);
   ok("week selector present", (await page.locator("#week").count()) > 0);
   ok("Day 1 shows Bench Press", (await page.getByText(/barbell bench press/i).count()) > 0);
-  ok("bench shows kg target", (await page.getByText(/kg target/i).count()) > 0);
+  ok("target weight removed from workout", (await page.getByText(/kg target/i).count()) === 0);
 
   // tick a set
   const set1 = page.getByRole("button", { name: /^set 1$/i }).first();
@@ -49,9 +49,20 @@ try {
   await page.goto(BASE + "/profile", { waitUntil: "networkidle" });
   await seeded();
   await page.waitForTimeout(600);
-  ok("profile renders current lifts", (await page.getByText(/current lifts/i).count()) > 0);
-  ok("profile shows nutrition", (await page.getByText(/protein/i).count()) > 0);
-  await page.screenshot({ path: "/tmp/w-profile.png" });
+  ok("profile current lifts removed", (await page.getByText(/current lifts/i).count()) === 0);
+  ok("profile has Best lifts", (await page.getByRole("heading", { name: /best lifts/i }).count()) > 0);
+  ok("profile has Stats (e1RM tile)", (await page.getByText(/top e1rm/i).count()) > 0);
+  ok("profile has Health section", (await page.getByRole("heading", { name: /^health$/i }).count()) > 0);
+  ok("profile nutrition editable (Protein)", (await page.getByText(/protein/i).count()) > 0);
+
+  // add a best lift
+  await page.getByPlaceholder(/lift \(e\.g/i).fill("Bench Press");
+  await page.locator('input[placeholder="kg"]').fill("120");
+  await page.locator('input[placeholder="reps"]').fill("3");
+  await page.getByRole("button", { name: /add lift/i }).click();
+  await page.waitForTimeout(500);
+  ok("best lift added (e1RM appears)", (await page.getByText(/e1rm/i).count()) > 0);
+  await page.screenshot({ path: "/tmp/w-profile.png", fullPage: true });
 
   // nav back to workout
   await page.getByRole("link", { name: /workout/i }).first().click();

@@ -145,3 +145,30 @@ export interface Check {
   dayId: string;
   ts: number;
 }
+
+// A user-entered best lift / PR.
+export interface BestLift {
+  id?: number;
+  name: string;
+  weightKg: number;
+  reps: number;
+  date: string;
+}
+
+// Health metrics (manually entered, or imported from a health app export).
+export interface Health {
+  id: string; // singleton "latest"
+  steps: number | null;
+  sleepH: number | null;
+  restingHr: number | null;
+  updatedAt: number;
+}
+
+// Editable nutrition targets (override the defaults).
+export interface NutritionTargets {
+  id: string; // singleton "targets"
+  calories: string;
+  protein: string;
+  carbs: string;
+  fats: string;
+}

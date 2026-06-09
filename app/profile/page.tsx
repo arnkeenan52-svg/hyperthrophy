@@ -3,11 +3,10 @@
 import { useRef } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import { toast } from "sonner";
-import { Download, Dumbbell, Moon, Upload, UtensilsCrossed } from "lucide-react";
+import { Download, Moon, Upload } from "lucide-react";
 import { db } from "@/lib/db";
 import { useProfile, useSettings } from "@/hooks/useDb";
-import { CURRENT_LIFTS } from "@/lib/data/program";
-import { NUTRITION, PROTOCOL_CHECKS, SLEEP } from "@/lib/data/protocol";
+import { PROTOCOL_CHECKS, SLEEP } from "@/lib/data/protocol";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -16,12 +15,17 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { exportData, importData } from "@/lib/backup";
 import { dateKey } from "@/lib/utils";
+import {
+  BestLifts,
+  HealthCard,
+  NutritionCard,
+  StatsGrid,
+} from "@/components/profile/ProfileSections";
 
 export default function ProfilePage() {
   const profile = useProfile();
   const settings = useSettings();
   const fileRef = useRef<HTMLInputElement>(null);
-
   const today = useLiveQuery(() => db.protocolDays.where("date").equals(dateKey()).first());
 
   async function setProfile(patch: Record<string, unknown>) {
@@ -59,16 +63,20 @@ export default function ProfilePage() {
   return (
     <div className="space-y-5 animate-fade-up">
       <header>
-        <h1 className="font-poster text-6xl uppercase leading-[0.85] tracking-tight">Pro<span className="text-ember">file</span></h1>
-        <p className="text-sm text-muted-foreground">Your stats, lifts & protocol</p>
+        <h1 className="font-poster text-6xl uppercase leading-[0.85] tracking-tight">
+          Pro<span className="text-ember">file</span>
+        </h1>
+        <p className="text-sm text-muted-foreground">Your stats, lifts &amp; health</p>
       </header>
 
-      {/* Profile stats */}
+      {/* Stats (lifting + health) */}
+      <StatsGrid />
+
+      {/* Identity */}
       <Card className="space-y-3 p-4">
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-2 gap-3">
           <Field label="Age" value={profile.age} onChange={(v) => setProfile({ age: v })} />
           <Field label="Height cm" value={profile.heightCm} onChange={(v) => setProfile({ heightCm: v })} />
-          <BwField />
         </div>
         <div>
           <Label className="mb-1 block">Goal focus</Label>
@@ -81,27 +89,15 @@ export default function ProfilePage() {
         </div>
       </Card>
 
-      {/* Current lifts reference */}
-      <Card className="p-4">
-        <h3 className="mb-3 flex items-center gap-2 font-display font-semibold">
-          <Dumbbell className="size-4 text-ember" /> Current lifts
-        </h3>
-        <div className="space-y-2">
-          {CURRENT_LIFTS.map((l) => (
-            <div key={l.lift} className="flex items-center justify-between text-sm">
-              <span>{l.lift}</span>
-              <span className="stat-num text-muted-foreground">{l.detail}</span>
-            </div>
-          ))}
-        </div>
-        <p className="mt-3 text-xs text-muted-foreground">
-          Your starting references for the 12-week program.
-        </p>
-      </Card>
+      {/* Best lifts (editable PRs) */}
+      <BestLifts />
 
-      {/* Today's protocol checks */}
+      {/* Health metrics */}
+      <HealthCard />
+
+      {/* Today's protocol */}
       <Card className="p-4">
-        <h3 className="mb-3 font-display font-semibold">Today&apos;s protocol</h3>
+        <h3 className="mb-3 font-display text-lg font-semibold uppercase tracking-wide">Today&apos;s protocol</h3>
         <div className="space-y-3">
           {PROTOCOL_CHECKS.map((c) => (
             <div key={c.key} className="flex items-center justify-between">
@@ -115,24 +111,12 @@ export default function ProfilePage() {
         </div>
       </Card>
 
-      {/* Nutrition reference */}
-      <Card className="p-4">
-        <h3 className="mb-3 flex items-center gap-2 font-display font-semibold">
-          <UtensilsCrossed className="size-4 text-ember" /> Nutrition targets
-        </h3>
-        <div className="space-y-2">
-          {NUTRITION.map((n) => (
-            <div key={n.label} className="flex items-center justify-between text-sm">
-              <span className="text-muted-foreground">{n.label}</span>
-              <span className="text-right font-medium">{n.value}</span>
-            </div>
-          ))}
-        </div>
-      </Card>
+      {/* Nutrition (editable) */}
+      <NutritionCard />
 
       {/* Sleep reference */}
       <Card className="p-4">
-        <h3 className="mb-3 flex items-center gap-2 font-display font-semibold">
+        <h3 className="mb-3 flex items-center gap-2 font-display text-lg font-semibold uppercase tracking-wide">
           <Moon className="size-4 text-current" /> Sleep
         </h3>
         <ul className="space-y-1.5 text-sm text-muted-foreground">
@@ -146,20 +130,10 @@ export default function ProfilePage() {
 
       {/* Settings + backup */}
       <Card className="space-y-3 p-4">
-        <h3 className="font-display font-semibold">Settings</h3>
+        <h3 className="font-display text-lg font-semibold uppercase tracking-wide">Settings</h3>
         <div className="flex items-center justify-between">
           <span className="text-sm">Haptics</span>
-          <Switch
-            checked={settings?.hapticsOn ?? true}
-            onCheckedChange={(v) => db.settings.update("app", { hapticsOn: v })}
-          />
-        </div>
-        <div className="flex items-center justify-between">
-          <span className="text-sm">Rest timer alert</span>
-          <Switch
-            checked={settings?.restSoundOn ?? true}
-            onCheckedChange={(v) => db.settings.update("app", { restSoundOn: v })}
-          />
+          <Switch checked={settings?.hapticsOn ?? true} onCheckedChange={(v) => db.settings.update("app", { hapticsOn: v })} />
         </div>
         <div className="flex gap-2 pt-1">
           <Button variant="secondary" className="flex-1" onClick={() => exportData().then(() => toast.success("Backup downloaded"))}>
@@ -194,29 +168,6 @@ function Field({
         inputMode="numeric"
         value={value}
         onChange={(e) => onChange(Number(e.target.value) || 0)}
-        className="text-center font-mono tabular-nums"
-      />
-    </div>
-  );
-}
-
-function BwField() {
-  const bw = useLiveQuery(() => db.bodyweight.orderBy("date").last());
-  return (
-    <div>
-      <Label className="mb-1 block text-xs">Weight kg</Label>
-      <Input
-        type="number"
-        inputMode="decimal"
-        defaultValue={bw?.weightKg ?? ""}
-        onBlur={async (e) => {
-          const w = Number(e.target.value);
-          if (!w) return;
-          const d = dateKey();
-          const ex = await db.bodyweight.where("date").equals(d).first();
-          if (ex) await db.bodyweight.update(ex.id!, { weightKg: w });
-          else await db.bodyweight.add({ date: d, weightKg: w });
-        }}
         className="text-center font-mono tabular-nums"
       />
     </div>

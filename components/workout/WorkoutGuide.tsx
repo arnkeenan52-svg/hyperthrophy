@@ -5,7 +5,7 @@ import { useLiveQuery } from "dexie-react-hooks";
 import { Check as CheckIcon, ChevronDown, RotateCcw, ShieldAlert } from "lucide-react";
 import { db } from "@/lib/db";
 import type { Check, DayType, PlanExercise } from "@/lib/db/types";
-import { WEEK_PLAN, roundTarget, weekFor } from "@/lib/data/weeks";
+import { WEEK_PLAN, weekFor } from "@/lib/data/weeks";
 import { cn } from "@/lib/utils";
 
 const dayLabel: Record<DayType, string> = {
@@ -159,7 +159,6 @@ export function WorkoutGuide() {
             key={pe.id}
             pe={pe}
             week={week}
-            loadPct={wk.loadPct}
             checkedKeys={checkedKeys}
             onToggle={toggle}
           />
@@ -189,40 +188,29 @@ export function WorkoutGuide() {
 function ExerciseRow({
   pe,
   week,
-  loadPct,
   checkedKeys,
   onToggle,
 }: {
   pe: PlanExercise;
   week: number;
-  loadPct: number;
   checkedKeys: Set<string>;
   onToggle: (key: string, checked: boolean) => void;
 }) {
   const isBig = pe.failureRule === "cap1RIR";
-  const target = pe.seedWeightKg ? roundTarget(pe.seedWeightKg * loadPct) : null;
   const reps = pe.repMin === pe.repMax ? `${pe.repMax}` : `${pe.repMin}–${pe.repMax}`;
 
   return (
     <div className="rounded-2xl border border-white/[0.07] bg-surface p-4">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex items-center gap-1.5">
-            <h3 className="font-display text-lg font-semibold leading-tight">{pe.name}</h3>
-            {isBig && <ShieldAlert className="size-4 shrink-0 text-current" />}
-          </div>
-          <p className="mt-0.5 text-sm text-muted-foreground">
-            <span className="stat-num font-semibold text-foreground">{pe.targetSets} × {reps}</span>
-            {" · "}rest {pe.restSec}s
-            {isBig && <span className="text-current-400"> · cap 1 RIR</span>}
-          </p>
+      <div className="min-w-0">
+        <div className="flex items-center gap-1.5">
+          <h3 className="font-display text-lg font-semibold leading-tight">{pe.name}</h3>
+          {isBig && <ShieldAlert className="size-4 shrink-0 text-current" />}
         </div>
-        {target != null && (
-          <div className="shrink-0 rounded-xl bg-ember/10 px-3 py-1.5 text-right">
-            <p className="stat-num text-lg font-bold leading-none text-ember-300">{target}</p>
-            <p className="text-[10px] uppercase tracking-wide text-muted-foreground">kg target</p>
-          </div>
-        )}
+        <p className="mt-0.5 text-sm text-muted-foreground">
+          <span className="stat-num font-semibold text-foreground">{pe.targetSets} × {reps}</span>
+          {" · "}rest {pe.restSec}s
+          {isBig && <span className="text-current-400"> · cap 1 RIR</span>}
+        </p>
       </div>
 
       {/* Set dots */}
