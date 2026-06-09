@@ -28,10 +28,17 @@ const big: FailureRule = "cap1RIR"; // Bench / Squat / Row — never true failur
 const fail: FailureRule = "lastSetToFailure";
 
 /**
- * The user's 5-day split, seeded verbatim.
- * Seed weights come from current lifts; bench is derived from a 120kg 1RM
- * (≈107.5kg for ~4 reps via Brzycki) and kept editable. Squat & OHP are left
- * blank on the first session by design. No deadlifts anywhere.
+ * Bump when the PROGRAM below changes so existing installs re-seed the new
+ * plans (without wiping best lifts, bodyweight, health, nutrition).
+ */
+export const PROGRAM_VERSION = 2;
+
+/**
+ * Back-Priority Hypertrophy Program (Rebalanced).
+ * Pull/back volume raised to match an already-strong press; quads trimmed;
+ * side delts and hinge work added. No deadlifts (hinge via back extension /
+ * hip thrust). Back-led Upper day. Target-weight display is off in the guide,
+ * so seed weights are omitted here.
  */
 export const PROGRAM: SeedDay[] = [
   {
@@ -41,12 +48,12 @@ export const PROGRAM: SeedDay[] = [
     dayType: "UPPER_HEAVY",
     focus: "Heavy",
     exercises: [
-      { name: "Barbell Bench Press", sets: 5, repMin: 3, repMax: 5, restSec: 180, cat: "barbell", failure: big, seed: 107.5 },
-      { name: "Barbell Row", sets: 5, repMin: 3, repMax: 5, restSec: 180, cat: "barbell", failure: big, seed: 65, match: "bent over barbell row" },
-      { name: "Overhead Press (barbell)", sets: 4, repMin: 4, repMax: 6, restSec: 120, cat: "barbell", failure: fail, match: "barbell shoulder press" },
-      { name: "Cable Pullover", sets: 4, repMin: 4, repMax: 6, restSec: 120, cat: "cable", failure: fail, match: "straight arm pulldown" },
-      { name: "Incline DB Press", sets: 3, repMin: 6, repMax: 8, restSec: 90, cat: "dumbbell", failure: fail, seed: 32, match: "incline dumbbell press" },
-      { name: "Reverse Pec Deck", sets: 3, repMin: 12, repMax: 15, restSec: 60, cat: "machine", failure: fail, match: "reverse machine fly" },
+      { name: "Barbell Row", sets: 4, repMin: 5, repMax: 7, restSec: 180, cat: "barbell", failure: big, match: "bent over barbell row", note: "Lead here — back is the priority. Or chest-supported row." },
+      { name: "Weighted Pull-up or Lat Pulldown", sets: 4, repMin: 6, repMax: 8, restSec: 150, cat: "cable", failure: fail, match: "wide grip lat pulldown" },
+      { name: "Barbell Bench Press", sets: 4, repMin: 4, repMax: 6, restSec: 180, cat: "barbell", failure: big, match: "barbell bench press" },
+      { name: "Overhead Press (barbell)", sets: 3, repMin: 5, repMax: 7, restSec: 150, cat: "barbell", failure: fail, match: "barbell shoulder press" },
+      { name: "Chest-Supported / Seated Cable Row", sets: 3, repMin: 8, repMax: 10, restSec: 90, cat: "cable", failure: fail, match: "seated cable rows" },
+      { name: "Reverse Pec Deck", sets: 3, repMin: 12, repMax: 15, restSec: 60, cat: "machine", failure: fail, match: "reverse machine fly", note: "Rear delts." },
     ],
   },
   {
@@ -56,11 +63,10 @@ export const PROGRAM: SeedDay[] = [
     dayType: "LOWER_HEAVY",
     focus: "Heavy",
     exercises: [
-      { name: "Barbell Squat", sets: 5, repMin: 3, repMax: 5, restSec: 180, cat: "barbell", failure: big, match: "barbell squat" },
-      { name: "Hack Squat", sets: 4, repMin: 6, repMax: 8, restSec: 120, cat: "machine", failure: fail, match: "hack squat" },
-      { name: "Leg Press", sets: 4, repMin: 8, repMax: 10, restSec: 120, cat: "machine", failure: fail, match: "leg press" },
-      { name: "Leg Curl (machine)", sets: 4, repMin: 8, repMax: 10, restSec: 90, cat: "machine", failure: fail, match: "lying leg curls" },
-      { name: "Seated Leg Curl", sets: 4, repMin: 8, repMax: 10, restSec: 90, cat: "machine", failure: fail, match: "seated leg curl", note: "Second hamstring curl variation" },
+      { name: "Barbell Squat", sets: 4, repMin: 4, repMax: 6, restSec: 180, cat: "barbell", failure: big, match: "barbell squat" },
+      { name: "45° Back Extension (or Hip Thrust)", sets: 3, repMin: 10, repMax: 12, restSec: 90, cat: "machine", failure: fail, match: "hyperextensions back extensions", note: "Hinge stimulus — hams, glutes, erectors. Not a deadlift." },
+      { name: "Leg Press", sets: 3, repMin: 8, repMax: 10, restSec: 120, cat: "machine", failure: fail, match: "leg press" },
+      { name: "Seated Leg Curl", sets: 4, repMin: 8, repMax: 10, restSec: 90, cat: "machine", failure: fail, match: "seated leg curl" },
       { name: "Calf Raises", sets: 4, repMin: 12, repMax: 15, restSec: 60, cat: "machine", failure: fail, match: "standing machine calf raise" },
     ],
   },
@@ -72,9 +78,9 @@ export const PROGRAM: SeedDay[] = [
     focus: "Volume",
     exercises: [
       { name: "Incline Barbell Press", sets: 4, repMin: 8, repMax: 10, restSec: 120, cat: "barbell", failure: fail, match: "barbell incline bench press medium grip" },
-      { name: "DB Shoulder Press", sets: 4, repMin: 8, repMax: 10, restSec: 90, cat: "dumbbell", failure: fail, match: "dumbbell shoulder press" },
+      { name: "DB Shoulder Press", sets: 3, repMin: 8, repMax: 10, restSec: 90, cat: "dumbbell", failure: fail, match: "dumbbell shoulder press" },
       { name: "Cable Chest Fly", sets: 4, repMin: 10, repMax: 12, restSec: 60, cat: "cable", failure: fail, match: "cable crossover" },
-      { name: "Lateral Raises", sets: 4, repMin: 12, repMax: 15, restSec: 60, cat: "dumbbell", failure: fail, match: "side lateral raise" },
+      { name: "Lateral Raises", sets: 5, repMin: 12, repMax: 15, restSec: 60, cat: "dumbbell", failure: fail, match: "side lateral raise", note: "Side delts — your weak point. Push these." },
       { name: "Tricep Rope Pushdown", sets: 3, repMin: 12, repMax: 15, restSec: 60, cat: "cable", failure: fail, match: "triceps pushdown" },
       { name: "Overhead Tricep Extension", sets: 3, repMin: 10, repMax: 12, restSec: 60, cat: "cable", failure: fail, match: "cable rope overhead triceps extension" },
     ],
@@ -86,12 +92,13 @@ export const PROGRAM: SeedDay[] = [
     dayType: "PULL_VOLUME",
     focus: "Volume",
     exercises: [
-      { name: "Lat Pulldown", sets: 4, repMin: 8, repMax: 10, restSec: 120, cat: "cable", failure: fail, seed: 80, match: "wide grip lat pulldown" },
-      { name: "Cable Row (seated)", sets: 4, repMin: 10, repMax: 12, restSec: 90, cat: "cable", failure: fail, match: "seated cable rows" },
-      { name: "DB Row (each arm)", sets: 4, repMin: 10, repMax: 12, restSec: 90, cat: "dumbbell", failure: fail, match: "one arm dumbbell row" },
-      { name: "Reverse Pec Deck", sets: 4, repMin: 15, repMax: 15, restSec: 60, cat: "machine", failure: fail, match: "reverse machine fly" },
-      { name: "Barbell/DB Curl", sets: 4, repMin: 10, repMax: 12, restSec: 60, cat: "dumbbell", failure: fail, seed: 18, match: "dumbbell bicep curl" },
-      { name: "Hammer Curl", sets: 3, repMin: 10, repMax: 12, restSec: 60, cat: "dumbbell", failure: fail, match: "hammer curls" },
+      { name: "Lat Pulldown (or Pull-up variation)", sets: 4, repMin: 8, repMax: 10, restSec: 120, cat: "cable", failure: fail, match: "wide grip lat pulldown" },
+      { name: "Chest-Supported / Seated Cable Row", sets: 4, repMin: 10, repMax: 12, restSec: 90, cat: "cable", failure: fail, match: "seated cable rows" },
+      { name: "DB Row (each arm)", sets: 3, repMin: 10, repMax: 12, restSec: 90, cat: "dumbbell", failure: fail, match: "one arm dumbbell row" },
+      { name: "Straight-Arm Pulldown", sets: 3, repMin: 12, repMax: 15, restSec: 60, cat: "cable", failure: fail, match: "straight arm pulldown", note: "Lat isolation — drive with the elbows." },
+      { name: "Face Pull / Reverse Pec Deck", sets: 4, repMin: 15, repMax: 15, restSec: 60, cat: "cable", failure: fail, match: "face pull", note: "Rear delts." },
+      { name: "Barbell/DB Curl", sets: 3, repMin: 8, repMax: 10, restSec: 60, cat: "dumbbell", failure: fail, match: "dumbbell bicep curl" },
+      { name: "Hammer Curl", sets: 3, repMin: 10, repMax: 12, restSec: 60, cat: "dumbbell", failure: fail, match: "hammer curls", note: "Optional if short on time." },
     ],
   },
   {
@@ -101,12 +108,12 @@ export const PROGRAM: SeedDay[] = [
     dayType: "LEGS_VOLUME",
     focus: "Volume",
     exercises: [
-      { name: "Squat (moderate)", sets: 4, repMin: 8, repMax: 10, restSec: 120, cat: "barbell", failure: big, match: "barbell squat" },
-      { name: "Leg Press", sets: 4, repMin: 10, repMax: 12, restSec: 90, cat: "machine", failure: fail, match: "leg press" },
-      { name: "Hack Squat or Bulgarian Split Squat", sets: 3, repMin: 10, repMax: 10, restSec: 90, cat: "machine", failure: fail, match: "hack squat", note: "3×10 each — pick one" },
-      { name: "Leg Extension", sets: 4, repMin: 12, repMax: 15, restSec: 60, cat: "machine", failure: fail, match: "leg extensions" },
+      { name: "Hack Squat or Moderate Squat", sets: 3, repMin: 8, repMax: 10, restSec: 120, cat: "machine", failure: big, match: "hack squat", note: "Pick one." },
+      { name: "Leg Press", sets: 3, repMin: 10, repMax: 12, restSec: 90, cat: "machine", failure: fail, match: "leg press" },
+      { name: "Leg Extension", sets: 3, repMin: 12, repMax: 15, restSec: 60, cat: "machine", failure: fail, match: "leg extensions" },
       { name: "Leg Curl", sets: 4, repMin: 10, repMax: 12, restSec: 60, cat: "machine", failure: fail, match: "lying leg curls" },
-      { name: "Calf Raises", sets: 5, repMin: 15, repMax: 20, restSec: 60, cat: "machine", failure: fail, match: "standing machine calf raise" },
+      { name: "Lateral Raises", sets: 3, repMin: 15, repMax: 20, restSec: 45, cat: "dumbbell", failure: fail, match: "side lateral raise", note: "Extra side-delt volume." },
+      { name: "Calf Raises", sets: 4, repMin: 15, repMax: 20, restSec: 60, cat: "machine", failure: fail, match: "standing machine calf raise" },
     ],
   },
 ];

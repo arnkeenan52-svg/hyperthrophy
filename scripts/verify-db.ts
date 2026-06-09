@@ -49,6 +49,24 @@ async function main() {
   await seedIfNeeded();
   check("seed is idempotent", (await db.plans.count()) === 5);
 
+  // --- Program-version migration: upgrade preserves user data, swaps plans ---
+  console.log("\n# Program upgrade migration");
+  await db.bestLifts.add({ name: "Bench Press", weightKg: 120, reps: 3, date: "2026-01-01" });
+  await db.bodyweight.put({ date: "2026-01-02", weightKg: 83 });
+  await db.checks.put({ key: "w1-old-s0", week: 1, dayId: "upper-heavy", ts: Date.now() });
+  // Pretend this install was seeded with the previous program.
+  const s = await db.settings.get("app");
+  await db.settings.put({ ...s!, programVersion: 1 });
+
+  await seedIfNeeded(); // should detect v1 != current and re-seed the program
+
+  const lead = await db.planExercises.where("planId").equals("upper-heavy").sortBy("order");
+  check("upgrade re-seeds new program (Row leads Upper)", lead[0]?.name === "Barbell Row", lead[0]?.name);
+  check("upgrade keeps best lifts", (await db.bestLifts.count()) === 1);
+  check("upgrade keeps bodyweight", !!(await db.bodyweight.where("date").equals("2026-01-02").first()));
+  check("upgrade clears stale set checks", (await db.checks.count()) === 0);
+  check("upgrade bumps programVersion", (await db.settings.get("app"))?.programVersion !== 1);
+
   console.log(`\n${pass} passed, ${fail} failed\n`);
   process.exit(fail > 0 ? 1 : 0);
 }

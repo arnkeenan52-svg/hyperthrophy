@@ -35,18 +35,20 @@ console.log("\n# Program data");
 check("5 plans seeded", PROGRAM.length === 5);
 const totalEx = PROGRAM.reduce((n, d) => n + d.exercises.length, 0);
 check("30 exercises across plans", totalEx === 30, `got ${totalEx}`);
-const bench = PROGRAM[0].exercises[0];
-check("Day1 first lift is Bench", bench.name === "Barbell Bench Press");
-check("Bench seeded ~107.5kg from 1RM", bench.seed === 107.5, `got ${bench.seed}`);
-check("Bench is cap1RIR (never failure)", bench.failure === "cap1RIR");
 const allNames = PROGRAM.flatMap((d) => d.exercises.map((e) => e.name.toLowerCase()));
+const lead = PROGRAM[0].exercises[0];
+check("Upper day is back-led (Row first)", lead.name === "Barbell Row");
+check("lead Row is cap1RIR (never failure)", lead.failure === "cap1RIR");
+check("Day1 includes Barbell Bench Press", allNames.includes("barbell bench press"));
 check(
   "no deadlift in program",
   !allNames.some((n) => EXCLUDED_KEYWORDS.some((k) => n.includes(k))),
 );
-check("squat left blank (no seed)", PROGRAM[1].exercises[0].seed === undefined);
-check("row seeded 65kg", PROGRAM[0].exercises[1].seed === 65);
-check("lat pulldown seeded 80kg", PROGRAM[3].exercises[0].seed === 80);
+const bigOnes = PROGRAM.flatMap((d) => d.exercises).filter((e) => e.failure === "cap1RIR").map((e) => e.name.toLowerCase());
+check("Bench, Squat & Row capped at 1 RIR", bigOnes.some((n) => n.includes("bench")) && bigOnes.some((n) => n.includes("squat")) && bigOnes.some((n) => n.includes("row")));
+// side delts ~8 sets (lateral raises across push + legs)
+const lateralSets = PROGRAM.flatMap((d) => d.exercises).filter((e) => /lateral rais/i.test(e.name)).reduce((n, e) => n + e.sets, 0);
+check("side-delt volume raised (≥8 lateral-raise sets)", lateralSets >= 8, `got ${lateralSets}`);
 check("bench 1RM reference = 120", ONE_RM_REFS[0].value === 120);
 
 console.log("\n# Overload engine");

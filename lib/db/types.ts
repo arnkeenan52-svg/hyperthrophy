@@ -126,6 +126,7 @@ export interface Settings {
   restSoundOn: boolean;
   hapticsOn: boolean;
   seeded: boolean;
+  programVersion?: number;
 }
 
 // Lightweight daily check-off for the "My Protocol" screen.

@@ -20,6 +20,7 @@ import {
   EXCLUDED_KEYWORDS,
   ONE_RM_REFS,
   PROGRAM,
+  PROGRAM_VERSION,
   SEED_BODYWEIGHT_KG,
   SEED_PROFILE,
 } from "@/lib/data/program";
@@ -154,9 +155,13 @@ function resolveExerciseId(
 /** Seed the database with the program, lifts, profile, and exercise library. */
 export async function seedIfNeeded(): Promise<void> {
   const existing = await db.settings.get("app");
-  if (existing?.seeded) return;
+  const fullSeed = !existing?.seeded;
+  const reseedProgram =
+    !fullSeed && (existing?.programVersion ?? 1) !== PROGRAM_VERSION;
+  if (!fullSeed && !reseedProgram) return;
 
-  const library = await loadLibrary();
+  // On a program-only update the library is already present; reuse it.
+  const library = fullSeed ? await loadLibrary() : await db.exercises.toArray();
   const byNorm = new Map<string, string>();
   for (const e of library) {
     const key = norm(e.name);
@@ -209,19 +214,29 @@ export async function seedIfNeeded(): Promise<void> {
       db.bodyweight,
       db.oneRmRefs,
       db.settings,
+      db.checks,
     ],
     async () => {
-      await db.exercises.bulkPut(library);
+      if (fullSeed) {
+        await db.exercises.bulkPut(library);
+        await db.profile.put({ ...SEED_PROFILE, updatedAt: Date.now() });
+        await db.bodyweight.put({ date: dateKey(), weightKg: SEED_BODYWEIGHT_KG });
+      }
+      // (Re)seed the program. clear() so dropped exercises don't linger.
+      await db.plans.clear();
       await db.plans.bulkPut(plans);
+      await db.planExercises.clear();
       await db.planExercises.bulkPut(planExercises);
-      await db.profile.put({ ...SEED_PROFILE, updatedAt: Date.now() });
-      await db.bodyweight.put({ date: dateKey(), weightKg: SEED_BODYWEIGHT_KG });
+      await db.oneRmRefs.clear();
       if (oneRmRefs.length) await db.oneRmRefs.bulkPut(oneRmRefs);
+      // Set tick-offs reference the old plan-exercise ids — reset them.
+      await db.checks.clear();
       await db.settings.put({
         id: "app",
-        restSoundOn: true,
-        hapticsOn: true,
+        restSoundOn: existing?.restSoundOn ?? true,
+        hapticsOn: existing?.hapticsOn ?? true,
         seeded: true,
+        programVersion: PROGRAM_VERSION,
       });
     },
   );
