@@ -1,6 +1,7 @@
 import Dexie, { type Table } from "dexie";
 import type {
   BodyweightEntry,
+  Check,
   Exercise,
   OneRmRef,
   Plan,
@@ -45,6 +46,7 @@ class HypertrophyDB extends Dexie {
   oneRmRefs!: Table<OneRmRef, number>;
   settings!: Table<Settings, string>;
   protocolDays!: Table<ProtocolDay, number>;
+  checks!: Table<Check, string>;
 
   constructor() {
     super("hyperthrophy");
@@ -60,6 +62,10 @@ class HypertrophyDB extends Dexie {
       oneRmRefs: "++id, exerciseId",
       settings: "id",
       protocolDays: "++id, date",
+    });
+    // v2: set check-offs for the Workout guide.
+    this.version(2).stores({
+      checks: "key, [week+dayId]",
     });
   }
 }

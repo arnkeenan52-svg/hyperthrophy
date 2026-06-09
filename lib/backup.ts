@@ -12,6 +12,7 @@ const TABLES = [
   "oneRmRefs",
   "settings",
   "protocolDays",
+  "checks",
 ] as const;
 
 /** Export the entire local database as a JSON blob and trigger a download. */

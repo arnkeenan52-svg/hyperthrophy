@@ -13,66 +13,57 @@ const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } });
 const page = await ctx.newPage();
 const errors = [];
 page.on("pageerror", (e) => errors.push(`${page.url()} :: ${e.message}`));
-
 const seeded = () =>
   page.waitForFunction(() => !document.body.innerText.includes("Loading your program"), { timeout: 20000 }).catch(() => {});
 
-async function visit(path, expect) {
-  await page.goto(BASE + path, { waitUntil: "networkidle", timeout: 30000 });
-  await seeded();
-  await page.waitForTimeout(800);
-  const txt = (await page.locator("body").innerText()).replace(/\s+/g, " ");
-  ok(`${path} renders "${expect}"`, txt.includes(expect), `got: ${txt.slice(0, 80)}`);
-  return txt;
-}
-
 try {
-  await visit("/", "Let's build");
-  await visit("/session", "Start training");
-  await visit("/plans", "My plans");
-  await visit("/progress", "Progress");
-  await visit("/library", "Library");
-  await visit("/profile", "Profile");
-
-  // Plans → open first plan editor
-  await page.goto(BASE + "/plans", { waitUntil: "networkidle" });
+  // --- Workout guide ---
+  await page.goto(BASE + "/", { waitUntil: "networkidle", timeout: 30000 });
   await seeded();
-  await page.getByText(/Upper · Heavy/i).first().click();
-  await page.waitForURL(/\/plans\//, { timeout: 8000 });
   await page.waitForTimeout(800);
-  ok("plan editor opens with exercises", (await page.getByText(/Barbell Bench Press/i).count()) > 0);
+  ok("home is the Workout guide", (await page.getByRole("heading", { name: /^workout$/i }).count()) > 0);
+  ok("week selector present", (await page.locator("#week").count()) > 0);
+  ok("Day 1 shows Bench Press", (await page.getByText(/barbell bench press/i).count()) > 0);
+  ok("bench shows kg target", (await page.getByText(/kg target/i).count()) > 0);
 
-  // Library → search + open detail
-  await page.goto(BASE + "/library", { waitUntil: "networkidle" });
-  await seeded();
-  await page.getByPlaceholder(/search exercises/i).fill("squat");
-  await page.waitForTimeout(600);
-  const firstCard = page.locator("a[href^='/library/']").first();
-  ok("library search returns results", (await firstCard.count()) > 0);
-  await firstCard.click();
-  await page.waitForURL(/\/library\//, { timeout: 8000 });
-  await page.waitForTimeout(600);
-  ok("library detail shows Instructions", (await page.getByText(/instructions|primary muscles/i).count()) > 0);
+  // tick a set
+  const set1 = page.getByRole("button", { name: /^set 1$/i }).first();
+  ok("set buttons present", (await set1.count()) > 0);
+  await set1.click();
+  await page.waitForTimeout(400);
+  ok("set 1 becomes 'done'", (await page.getByRole("button", { name: /set 1 done/i }).count()) > 0);
+  await page.screenshot({ path: "/tmp/w-day1.png" });
 
-  // Profile → toggle a protocol switch + log bodyweight
+  // change week → directive updates
+  await page.selectOption("#week", "6");
+  await page.waitForTimeout(400);
+  ok("week 6 directive updates (failure)", /failure/i.test(await page.locator("body").innerText()));
+
+  // switch to Pull day
+  await page.getByRole("button", { name: /pull/i }).first().click();
+  await page.waitForTimeout(400);
+  ok("Pull day shows Lat Pulldown", (await page.getByText(/lat pulldown/i).count()) > 0);
+  await page.screenshot({ path: "/tmp/w-pull.png" });
+
+  // --- Profile ---
   await page.goto(BASE + "/profile", { waitUntil: "networkidle" });
   await seeded();
-  ok("profile shows current lifts (Bench Press)", (await page.getByText(/Bench Press/i).count()) > 0);
-  ok("profile shows nutrition targets", (await page.getByText(/Protein/i).count()) > 0);
-  const sw = page.locator('button[role="switch"]').first();
-  if (await sw.count()) { await sw.click(); await page.waitForTimeout(300); ok("protocol switch toggles", true); }
+  await page.waitForTimeout(600);
+  ok("profile renders current lifts", (await page.getByText(/current lifts/i).count()) > 0);
+  ok("profile shows nutrition", (await page.getByText(/protein/i).count()) > 0);
+  await page.screenshot({ path: "/tmp/w-profile.png" });
 
-  // Progress → charts present after the logged session from e2e? fresh ctx has none, but page renders
-  await page.goto(BASE + "/progress", { waitUntil: "networkidle" });
-  await seeded();
-  ok("progress shows Pull focus card", (await page.getByText(/pull focus/i).count()) > 0);
+  // nav back to workout
+  await page.getByRole("link", { name: /workout/i }).first().click();
+  await page.waitForTimeout(500);
+  ok("nav back to workout works", (await page.locator("#week").count()) > 0);
 } catch (e) {
   fail++;
   log("FATAL", e.message);
 } finally {
   log("\n=== PAGE ERRORS ===");
   log(errors.join("\n") || "(none)");
-  log(`\n${fail === 0 ? "ALL PAGE CHECKS PASSED ✅" : fail + " CHECK(S) FAILED ❌"}`);
+  log(`\n${fail === 0 ? "ALL E2E CHECKS PASSED ✅" : fail + " CHECK(S) FAILED ❌"}`);
   await browser.close();
   process.exit(fail > 0 ? 1 : 0);
 }

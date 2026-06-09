@@ -137,3 +137,11 @@ export interface ProtocolDay {
   sleptEnough: boolean;
   noPhoneBeforeBed: boolean;
 }
+
+// A ticked-off set in the Workout guide. Key = `w{week}-{planExerciseId}-s{setIndex}`.
+export interface Check {
+  key: string;
+  week: number;
+  dayId: string;
+  ts: number;
+}

@@ -1,11 +1,16 @@
 import type { Metadata, Viewport } from "next";
-import { Inter, Space_Grotesk, JetBrains_Mono } from "next/font/google";
+import { Inter, Barlow_Condensed, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 import { Providers } from "@/components/providers";
 import { BottomNav } from "@/components/shell/BottomNav";
 
 const inter = Inter({ subsets: ["latin"], variable: "--font-sans" });
-const display = Space_Grotesk({ subsets: ["latin"], variable: "--font-display" });
+// Athletic condensed display face (ui-ux-pro-max recommendation for fitness).
+const display = Barlow_Condensed({
+  subsets: ["latin"],
+  weight: ["500", "600", "700"],
+  variable: "--font-display",
+});
 const mono = JetBrains_Mono({ subsets: ["latin"], variable: "--font-mono" });
 
 export const metadata: Metadata = {

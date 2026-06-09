@@ -95,7 +95,7 @@ export default function ProfilePage() {
           ))}
         </div>
         <p className="mt-3 text-xs text-muted-foreground">
-          Starting references — live PRs track on the Progress tab.
+          Your starting references for the 12-week program.
         </p>
       </Card>
 
