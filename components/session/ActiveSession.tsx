@@ -113,13 +113,35 @@ export function ActiveSession({ session }: { session: Session }) {
       <Celebration show={celebrate} />
 
       {/* Sticky session header */}
-      <div className="sticky top-0 z-20 -mx-4 bg-background/80 px-4 pb-3 pt-1 backdrop-blur">
+      <div className="sticky top-0 z-20 -mx-4 border-b border-white/[0.06] bg-background/70 px-4 pb-3 pt-2 backdrop-blur-xl">
         <div className="flex items-center justify-between">
-          <div>
-            <h1 className="font-display text-xl font-bold">{session.name}</h1>
-            <p className="font-mono text-xs tabular-nums text-muted-foreground">
-              {formatClock(elapsed)} elapsed
-            </p>
+          <div className="flex items-center gap-3">
+            {/* circular progress ring */}
+            <div className="relative size-11 shrink-0">
+              <svg viewBox="0 0 44 44" className="size-11 -rotate-90">
+                <circle cx="22" cy="22" r="18" className="fill-none stroke-surface-2" strokeWidth="4" />
+                <circle
+                  cx="22"
+                  cy="22"
+                  r="18"
+                  className="fill-none stroke-ember"
+                  strokeWidth="4"
+                  strokeLinecap="round"
+                  strokeDasharray={2 * Math.PI * 18}
+                  strokeDashoffset={2 * Math.PI * 18 * (1 - progress / 100)}
+                  style={{ transition: "stroke-dashoffset 0.5s ease" }}
+                />
+              </svg>
+              <span className="absolute inset-0 flex items-center justify-center font-mono text-[11px] font-bold tabular-nums">
+                {completedExercises}/{list.length}
+              </span>
+            </div>
+            <div>
+              <h1 className="font-display text-xl font-bold leading-tight">{session.name}</h1>
+              <p className="font-mono text-xs tabular-nums text-muted-foreground">
+                {formatClock(elapsed)} · <span className="font-semibold text-ember">{formatNumber(volume)}</span> kg
+              </p>
+            </div>
           </div>
           <button
             onClick={onQuit}
@@ -128,15 +150,7 @@ export function ActiveSession({ session }: { session: Session }) {
             <X className="size-3.5" /> End
           </button>
         </div>
-        <div className="mt-2.5 flex items-center gap-3">
-          <Progress value={progress} className="h-1.5" />
-          <span className="shrink-0 text-xs text-muted-foreground">
-            {completedExercises}/{list.length}
-          </span>
-        </div>
-        <p className="mt-1 text-xs text-muted-foreground">
-          <span className="stat-num font-semibold text-ember">{formatNumber(volume)}</span> kg volume
-        </p>
+        <Progress value={progress} className="mt-2.5 h-1" />
       </div>
 
       <div className="space-y-3">

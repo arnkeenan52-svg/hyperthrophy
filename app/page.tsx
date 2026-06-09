@@ -11,7 +11,6 @@ import {
   useAllSetLogs,
   useBodyweight,
   usePlans,
-  useProfile,
   useSessions,
   nextPlan,
 } from "@/hooks/useDb";
@@ -27,7 +26,6 @@ const dayLabel: Record<string, string> = {
 };
 
 export default function HomePage() {
-  const profile = useProfile();
   const plans = usePlans();
   const sessions = useSessions();
   const setLogs = useAllSetLogs();
@@ -44,34 +42,38 @@ export default function HomePage() {
     <div className="space-y-6 animate-fade-up">
       <header className="flex items-center justify-between">
         <div>
-          <p className="text-sm text-muted-foreground">
+          <p className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
             {new Date().toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" })}
           </p>
-          <h1 className="font-display text-2xl font-bold">
-            Let&apos;s build.
+          <h1 className="font-display text-3xl font-bold tracking-tight">
+            Let&apos;s <span className="text-gradient-ember">build.</span>
           </h1>
         </div>
-        <Badge variant="current">{profile?.goalFocus ? "Pull focus" : "—"}</Badge>
+        <Badge variant="current">Pull focus</Badge>
       </header>
 
       {/* Today's session hero */}
-      <Card className="relative overflow-hidden">
-        <div className="absolute inset-0 bg-gradient-to-br from-ember/15 via-transparent to-transparent" />
-        <div className="relative p-5">
-          <p className="text-xs uppercase tracking-wider text-muted-foreground">
-            {active ? "Session in progress" : "Today's session"}
-          </p>
-          <h2 className="mt-1 font-display text-3xl font-bold">
-            {active ? active.name : today ? dayLabel[today.dayType] : "Rest"}
+      <Card className="relative overflow-hidden border-white/10">
+        <div className="pointer-events-none absolute -right-20 -top-20 h-56 w-56 rounded-full bg-ember/25 opacity-40 blur-3xl" />
+        <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-white/[0.06] via-transparent to-transparent" />
+        <div className="relative p-6">
+          <div className="flex items-center gap-2">
+            {active && <span className="size-2 animate-pulse rounded-full bg-ember" />}
+            <p className="text-xs font-medium uppercase tracking-[0.18em] text-ember/80">
+              {active ? "Session in progress" : "Today's session"}
+            </p>
+          </div>
+          <h2 className="mt-2 font-display text-4xl font-bold tracking-tight">
+            {active ? active.name : today ? dayLabel[today.dayType] : "Rest day"}
           </h2>
-          <p className="mt-1 text-sm text-muted-foreground">
+          <p className="mt-1.5 text-sm text-muted-foreground">
             {active
               ? "Pick up where you left off"
               : today
                 ? `${today.name} day · tap to start logging`
-                : "No plan scheduled"}
+                : "No plan scheduled — enjoy the recovery"}
           </p>
-          <Button asChild size="lg" className="mt-4 w-full">
+          <Button asChild size="lg" className="mt-5 w-full glow-ember">
             <Link href="/session">
               <Dumbbell className="size-5" />
               {active ? "Resume session" : "Start session"}

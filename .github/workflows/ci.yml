@@ -35,3 +35,6 @@ jobs:
 
       - name: Verify DB seeding (real dataset)
         run: npm run verify:db
+
+      - name: Verify session flow
+        run: npm run verify:session
