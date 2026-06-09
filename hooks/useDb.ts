@@ -28,7 +28,12 @@ export function useSessions() {
 }
 
 export function useActiveSession() {
-  return useLiveQuery(() => db.sessions.where("status").equals("active").first());
+  // `.first()` returns undefined both while loading AND when there's no active
+  // session — coalesce the "resolved but empty" case to null so callers can
+  // distinguish loading (undefined) from no-active-session (null).
+  return useLiveQuery(
+    async () => (await db.sessions.where("status").equals("active").first()) ?? null,
+  );
 }
 
 export function useAllSetLogs() {
