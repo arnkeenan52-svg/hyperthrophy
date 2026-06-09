@@ -14,9 +14,10 @@ export function BottomNav() {
   const pathname = usePathname();
 
   return (
-    <nav className="fixed inset-x-0 bottom-0 z-40 pb-[env(safe-area-inset-bottom)]">
-      <div className="pointer-events-none absolute inset-x-0 -top-8 h-8 bg-gradient-to-t from-background to-transparent" />
-      <div className="mx-auto max-w-xl px-4 pb-3">
+    <nav className="fixed inset-x-0 bottom-0 z-40">
+      {/* Fade runs from above the bar all the way to the bottom edge — no gap. */}
+      <div className="pointer-events-none absolute inset-x-0 -top-10 bottom-0 bg-gradient-to-t from-background via-background to-transparent" />
+      <div className="relative mx-auto max-w-xl px-4 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
         <div className="glass flex items-stretch justify-around rounded-2xl p-1.5 shadow-[0_8px_30px_-8px_rgba(0,0,0,0.7)]">
           {items.map((item) => {
             const active =
