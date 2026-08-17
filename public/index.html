@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Tradeleaks — Premium</title>
+  <link rel="icon" href="/logo.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Space+Grotesk:wght@500;600;700&display=swap" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="top">
+    <div class="wordmark">TRADE<span>LEAKS</span></div>
+    <div id="account" class="account"></div>
+  </header>
+
+  <main class="checkout">
+    <div class="brand">
+      <img class="logo" src="/logo.png" alt="Tradeleaks" width="84" height="84" />
+      <h1 id="plan-name">&nbsp;</h1>
+      <p class="brand-name">Tradeleaks</p>
+      <p class="tagline" id="plan-desc"></p>
+    </div>
+
+    <div id="notice"></div>
+
+    <section class="panel row-panel">
+      <span class="row-label">Price</span>
+      <span class="row-value" id="price">&nbsp;</span>
+    </section>
+
+    <section class="panel" id="roles-panel" hidden>
+      <p class="label">Discord roles included</p>
+      <div class="chips" id="role-chips"></div>
+    </section>
+
+    <section class="panel">
+      <p class="label">Select option</p>
+      <div id="options"></div>
+    </section>
+
+    <section class="panel">
+      <p class="label">Payment method</p>
+      <div class="methods" id="methods"></div>
+    </section>
+
+    <div id="cta-area"></div>
+
+    <p class="fineprint">
+      One-time payment, lifetime access — no recurring charges. Your role
+      lands in the server the moment payment confirms.
+    </p>
+  </main>
+
+  <footer>
+    <span>© Tradeleaks. Not financial advice — obviously.</span>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>
