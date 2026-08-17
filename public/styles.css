@@ -70,9 +70,21 @@ body {
 .powered-mark { height: 18px; width: auto; margin: 6px auto 0; }
 
 .top-left { display: flex; align-items: center; gap: 14px; }
-.top-divider { width: 1px; height: 18px; background: #333; }
-.back-link { color: var(--dim); font-size: 13.5px; text-decoration: none; }
-.back-link:hover { color: var(--ink); }
+
+/* ── diagnostics (owner-only doctor view) ─────────────────────────────────── */
+.diagnostics #diag-body { display: flex; flex-direction: column; gap: 10px; }
+.diag-row { display: flex; flex-direction: column; gap: 6px; padding: 15px 18px; }
+.diag-name { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 14.5px; }
+.diag-icon { width: 20px; text-align: center; flex: none; }
+.diag-status { margin-left: auto; font-size: 11px; font-weight: 800; letter-spacing: 0.08em; color: var(--dim); }
+.diag-detail { color: var(--dim); font-size: 13.5px; padding-left: 30px; overflow-wrap: anywhere; }
+.diag-fix { color: var(--ink); font-size: 13.5px; padding-left: 30px; overflow-wrap: anywhere; }
+.diag-pass .diag-icon { color: var(--good); }
+.diag-fail { border-color: rgba(248, 113, 113, 0.5); }
+.diag-fail .diag-icon, .diag-fail .diag-status { color: var(--bad); }
+.diag-warn .diag-icon { color: #fbbf24; }
+.diag-skip .diag-icon { color: var(--dim); }
+.doctor-banner a { color: #fff; font-weight: 700; }
 
 /* Connect-Wallet-style pill for the header action */
 .btn-pill {
