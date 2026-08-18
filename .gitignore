@@ -1,6 +1,9 @@
-.env
-data/
 node_modules/
+.claude/skills/
+.env
 *.sqlite
-*.sqlite-wal
 *.sqlite-shm
+*.sqlite-wal
+__pycache__/
+*.pyc
+*.log
