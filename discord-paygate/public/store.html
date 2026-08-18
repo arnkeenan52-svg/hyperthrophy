@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Checkout — Ripley</title>
+  <meta name="description" content="Secure checkout for Discord communities — pay once, roles delivered in seconds." />
+  <!-- Link previews (Discord/Twitter/iMessage). The title is set per store by
+       app.js once the store loads; these statics are the platform fallback. -->
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="Checkout — Ripley" />
+  <meta property="og:description" content="Secure checkout for Discord communities — pay once, roles delivered in seconds." />
+  <meta name="twitter:card" content="summary" />
+  <meta name="twitter:title" content="Checkout — Ripley" />
+  <meta name="twitter:description" content="Secure checkout for Discord communities — pay once, roles delivered in seconds." />
+  <link rel="icon" type="image/png" href="/favicon.png" />
+  <link rel="apple-touch-icon" href="/favicon.png" />
+  <link rel="stylesheet" href="/styles.css?v=20" />
+</head>
+<body>
+  <header class="top">
+    <div class="top-left">
+      <a href="/"><img class="platform-mark" src="/ripley.png" alt="Ripley" height="18" /></a>
+    </div>
+    <div id="account" class="account"></div>
+  </header>
+
+  <main class="checkout">
+    <section class="panel order-card">
+      <h1 class="order-title">Confirm Order</h1>
+      <p class="order-sub">You are about to purchase the following product:</p>
+
+      <div class="order-product">
+        <div class="op-left">
+          <img class="op-thumb" id="product-shot" alt="" hidden onerror="this.hidden = true" />
+          <span class="op-name" id="plan-name">&nbsp;</span>
+        </div>
+        <span class="op-price" id="price">&nbsp;</span>
+        <div class="op-server">
+          <img class="logo op-server-icon" src="" alt="" width="34" height="34" hidden />
+          <span class="op-server-meta"><strong id="server-name" hidden></strong><span class="op-server-kind">Discord Server</span></span>
+        </div>
+      </div>
+
+      <div class="order-roles" id="roles-box" hidden>
+        <span class="order-roles-label">Discord Roles Included:</span>
+        <span class="chips" id="roles-chips"></span>
+      </div>
+
+      <p class="tagline" id="plan-desc"></p>
+      <div id="notice"></div>
+
+      <p class="label" id="options-label">Select Option</p>
+      <div id="options"></div>
+
+      <p class="label">Payment Method:</p>
+      <div class="methods" id="methods"></div>
+
+      <section class="pay-panel" id="pay-panel">
+        <h2 id="pay-title">Pay with Card</h2>
+        <p class="pay-sub" id="pay-sub">Secure payment processed by Stripe</p>
+        <details class="order-extra">
+          <summary>Add a note or discount code</summary>
+          <label class="field"><span class="field-label">Note to the owner</span>
+            <textarea id="buyer-note" maxlength="500" rows="2" placeholder="e.g., bought for @friend"></textarea></label>
+          <label class="field" id="discount-field" hidden><span class="field-label">Discount code</span>
+            <input id="discount-code" type="text" maxlength="32" placeholder="LAUNCH20" spellcheck="false" style="text-transform:uppercase" /></label>
+        </details>
+        <div id="cta-area"></div>
+        <p class="redirect-note" id="redirect-note"></p>
+        <div class="trust-row" id="trust-row"></div>
+      </section>
+    </section>
+
+    <div id="error-slot"></div>
+  </main>
+
+  <footer>
+    <span class="powered-label">Checkout powered by:</span>
+    <img class="powered-mark" src="/ripley.png" alt="Ripley" height="18" />
+  </footer>
+
+  <script src="/app.js?v=20"></script>
+</body>
+</html>
