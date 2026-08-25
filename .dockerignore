@@ -2,6 +2,7 @@ node_modules
 public
 api
 src
+!src/lib/welcome-card.js
 data
 *.sqlite
 .git
