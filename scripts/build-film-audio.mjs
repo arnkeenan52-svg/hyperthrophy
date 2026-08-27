@@ -22,7 +22,34 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = process.env.FILM_AUDIO || path.join(ROOT, 'tmp-film-audio.wav');
 const SR = 48000;
-const DUR = 20.0;
+const DUR = 29.43;
+// ── THE RETIME ──────────────────────────────────────────────────────────────
+// The identical variable-rate table to hero/film.html: picture-synced cues and
+// chord turns remap through newT(); the pulse keeps its 120 BPM on the real
+// clock. Motion stretches 1.15-1.35x, dwells 1.8-2.5x, the payoff (Pay press
+// through the swirl and the receipt pops) plays at exactly 1.0x.
+const SEGS = [
+  [0.00, 0.16, 2.50], [0.16, 1.44, 1.25], [1.44, 1.64, 2.00],
+  [1.64, 2.12, 1.25], [2.12, 2.28, 2.00], [2.28, 3.52, 1.20],
+  [3.52, 4.16, 2.50], [4.16, 4.92, 1.20], [4.92, 5.52, 2.50],
+  [5.52, 5.92, 1.15], [5.92, 6.88, 1.35], [6.88, 7.12, 1.80],
+  [7.12, 7.48, 1.30], [7.48, 7.92, 1.80], [7.92, 8.08, 1.20],
+  [8.08, 8.52, 1.80], [8.52, 9.40, 1.30], [9.40, 9.68, 1.80],
+  [9.68, 10.04, 1.25], [10.04, 10.44, 1.80], [10.44, 10.72, 1.25],
+  [10.72, 11.40, 2.20], [11.40, 12.84, 1.35], [12.84, 13.00, 1.80],
+  [13.00, 13.40, 1.25], [13.40, 13.56, 1.80], [13.56, 17.16, 1.00],
+  [17.16, 17.48, 2.00], [17.48, 18.16, 1.15], [18.16, 18.80, 1.30],
+  [18.80, 20.00, 2.20],
+];
+const newT = (o) => {
+  let n = 0;
+  for (const [a, b, s] of SEGS) {
+    if (o <= a) break;
+    n += (Math.min(o, b) - a) * s;
+  }
+  return n;
+};
+
 const N = Math.round(SR * DUR);
 
 // ── deterministic noise ───────────────────────────────────────────────────────
@@ -389,6 +416,7 @@ const CHORDS = [
   { at: 15.92, to: 18.16, root: 65.41, tri: [261.63, 329.63, 392.00] }, // C
   { at: 18.16, to: 20.00, root: 55.00, tri: [220.00, 277.18, 329.63] }, // A major
 ];
+CHORDS.forEach((c) => { c.at = newT(c.at); c.to = newT(c.to); });
 const chordAt = (t) => CHORDS[Math.max(0, CHORDS.findIndex((c) => t < c.to - 1e-6))] || CHORDS[CHORDS.length - 1];
 
 // ── the cue sheet ─────────────────────────────────────────────────────────────
@@ -421,10 +449,10 @@ CHORDS.forEach((c, i) => {
 // stating two notes over the title, and a swell that empties into the cut to the
 // store card at 1.16.
 sweepSub(0.00, 0.95, 88, 38, 0.52);
-pluck(0.34, 220.00, 0.85, -0.30, 0.80);
-pluck(0.74, 329.63, 0.75, 0.32, 0.70);
+pluck(newT(0.34), 220.00, 0.85, -0.30, 0.80);
+pluck(newT(0.74), 329.63, 0.75, 0.32, 0.70);
 swell(0.30, 0.86, 1.0);
-impact(1.16, 0.26, 0.62);          // the cut lands, softly — a settle, not a bang
+impact(newT(1.16), 0.26, 0.62);          // the cut lands, softly — a settle, not a bang
 
 // ── drums ───────────────────────────────────────────────────────────────────
 // Built in stages so the arrangement grows with the film rather than running
@@ -438,12 +466,12 @@ impact(1.16, 0.26, 0.62);          // the cut lands, softly — a settle, not a 
 //  13.50 - 14.00  NOTHING but the riser — the pre-drop
 //  14.00          impact, and the rhythm stops dead
 //  16.00 - 18.00  a bare pulse under the alerts
-on(1.50, 13.51, BAR / 2, (t) => kick(t, t < 3.3 ? 0.78 : 1.0));
-on(4.00, 13.51, BAR / 2, (t) => kick(t + BEAT * 1.5, 0.40));   // the pickup kick
-on(3.50, 13.51, BAR, (t) => clap(t + BEAT, t < 5.6 ? 0.75 : 1.0));
+on(newT(1.50), newT(13.51), BAR / 2, (t) => kick(t, t < newT(3.3) ? 0.78 : 1.0));
+on(newT(4.00), newT(13.51), BAR / 2, (t) => kick(t + BEAT * 1.5, 0.40));   // the pickup kick
+on(newT(3.50), newT(13.51), BAR, (t) => clap(t + BEAT, t < newT(5.6) ? 0.75 : 1.0));
 // Eighths alternate either side of centre; the pattern's own position in the bar
 // picks the side, so it is the same every render.
-on(3.50, 13.51, BEAT / 2, (t) => {
+on(newT(3.50), newT(13.51), BEAT / 2, (t) => {
   const n = Math.round(t / (BEAT / 2));
   const downbeat = Math.abs((t / BEAT) % 1) < 0.01;
   hat(t, downbeat ? 0.55 : 0.85, 0.030, (n % 2 ? 0.26 : -0.24));
@@ -451,12 +479,12 @@ on(3.50, 13.51, BEAT / 2, (t) => {
 // Sixteenth accents once the theming beat starts, which is where the picture
 // gets busiest — the ear follows density. Wider than the eighths, and swung 9ms
 // late on the off-sixteenths so the pattern breathes instead of ticking.
-on(7.90, 11.90, BEAT / 4, (t) => {
+on(newT(7.90), newT(11.90), BEAT / 4, (t) => {
   const n = Math.round(t / (BEAT / 4));
   const off = n % 2 ? 0.009 : 0;
   hat(t + off, n % 2 ? 0.30 : 0.38, 0.018, (n % 4 < 2 ? -0.46 : 0.44));
 });
-on(5.60, 13.51, BAR, (t) => bass(t, chordAt(t).root, 1.1, t < 11.85 ? 0.9 : 1.0));
+on(newT(5.60), newT(13.51), BAR, (t) => bass(t, chordAt(t).root, 1.1, t < newT(11.85) ? 0.9 : 1.0));
 
 // ── the motif ───────────────────────────────────────────────────────────────
 // Eighth-note arpeggio on whatever chord is in force, alternating across the
@@ -464,7 +492,7 @@ on(5.60, 13.51, BAR, (t) => bass(t, chordAt(t).root, 1.1, t < 11.85 ? 0.9 : 1.0)
 // the product sheet and the theming — and drops out for the pre-drop so the
 // riser has the whole mix.
 const FIGURE = [0, 2, 1, 2, 0, 3, 1, 2];
-on(6.52, 13.50, BEAT / 2, (t) => {
+on(newT(6.52), newT(13.50), BEAT / 2, (t) => {
   const c = chordAt(t);
   const step = Math.round((t - 6.52) / (BEAT / 2)) % FIGURE.length;
   const k = FIGURE[step];
@@ -488,59 +516,63 @@ on(6.52, 13.50, BEAT / 2, (t) => {
 // the pointer is on that frame. It is the cheapest possible way to tie sound to
 // picture and almost nothing does it.
 //
-//    2.30  store    "Create store"      x=1210  the film's first press
-//    5.86  stripe   "Connect Stripe"    x=1081  the ignition
-//    7.96  product  the price commits   x= 693
-//    8.54  product  the @VIP role chip  x= 575
-//    9.72  theme    Blurple             x= 718  (Midnight -> Blurple -> Ivory:
-//   10.46  theme    Ivory               x= 525   dark, blue, white, nothing else)
-//   11.42  theme    the slider GRAB     x= 615  softer, a drag is not a click
-//   12.02  theme    mid-drag            x= 249  the far end of the travel
-//   12.62  theme    the RELEASE         x= 774  softer still
-//   13.60  live     "Pay with card"     x=1225  the press the burst is born from
+//    2.30  store    "Create store"      x= 992  the film's first press
+//    4.20  dark     the Stripe pulse    edges   not a press: the tick the wires
+//                                               light up on, softer, centred
+//    7.96  product  billing confirms    x=1262
+//    8.54  product  "Create product"    x= 988
+//    9.72  theme    the Blurple preset  x= 737
+//   10.46  theme    the Serif segment   x= 610
+//   11.42  theme    the corners GRAB    x= 625  softer, a drag is not a click
+//   12.62  theme    the RELEASE         x= 366  softer still — down at 2px
+//   13.02  cta      "Publish store"     x= 982  the press that becomes the window
+//   13.28  live     the Lifetime option x=1146  the buyer choosing
+//   13.60  live     "Pay with card"     x= 960  the press the burst is born from
 const CLICKS = [
-  [2.30, 1.00, 0.261], [5.86, 1.00, 0.126], [7.96, 1.00, -0.278],
-  [8.54, 1.00, -0.401], [9.72, 1.00, -0.252], [10.46, 1.00, -0.453],
-  [11.42, 0.50, -0.359], [12.62, 0.34, -0.194], [13.60, 1.00, 0.276],
+  [2.30, 1.00, 0.033], [4.20, 0.35, 0.0], [7.96, 1.00, 0.314],
+  [8.54, 1.00, 0.029], [9.72, 1.00, -0.232], [10.46, 1.00, -0.365],
+  [11.42, 0.50, -0.349], [12.62, 0.34, -0.619], [13.02, 1.00, 0.023],
+  [13.28, 0.45, 0.194], [13.60, 1.00, 0.0],
 ];
-CLICKS.forEach(([t, g, p]) => click(t, g, p));
+CLICKS.forEach(([t, g, p]) => click(newT(t), g, p));
 
 // ── scene changes ───────────────────────────────────────────────────────────
-// The beat table in hero/film.html cuts at 3.44, 6.52, 9.00, 12.48, 15.92 and
-// 18.16. Two of those used to have something under them and four had nothing,
-// which is why the middle of the film felt like one long take with music on it.
-// Each sweep runs ACROSS the image in the direction the next beat arrives from,
-// so the edit is audible without being an effect.
-whoosh(6.26, 0.42, 0.62, 0.55, -0.55);
-whoosh(8.74, 0.42, 0.68, -0.55, 0.55);
-whoosh(12.22, 0.38, 0.55, 0.50, -0.50);
-whoosh(15.66, 0.44, 0.72, -0.60, 0.60);
+// The rebuilt film's junctions: the dark room's exit whip starts at 5.56 and
+// the worksheet lands on the 5.92 impact; the worksheet leaves upward at 8.84
+// under the theme's rise; the theme whips out at 12.68 handing to the carried
+// CTA; the burst washes into the receipts at 15.66. Each sweep runs ACROSS the
+// image in the direction the world is actually moving on those frames.
+whoosh(newT(5.60), 0.40, 0.66, 0.60, -0.60);
+whoosh(newT(8.86), 0.42, 0.68, -0.55, 0.55);
+whoosh(newT(12.68), 0.38, 0.58, 0.55, -0.55);
+whoosh(newT(15.66), 0.44, 0.72, -0.60, 0.60);
 
 // ── the two big moments ─────────────────────────────────────────────────────
 // The room change into the dark Stripe beat, and the burst.
-impact(3.30, 0.55, 0.55);
-riser(12.90, 1.10, 1.0);
-impact(14.00, 1.0, 0.85);
+impact(newT(3.30), 0.55, 0.55);          // the keycap drops out of the rising dark
+impact(newT(4.56), 0.50, 0.65);          // ignition: the pulse reaches the keycap
+impact(newT(5.92), 0.40, 0.45);          // the worksheet lands out of the exit whip
+riser(newT(12.90), 1.10, 1.0);
+impact(newT(14.00), 1.0, 0.85);
 // After the burst the rhythm stops dead and only the room is left ringing. A
 // sub swelling out of that silence is what carries 1.9 seconds of held picture
 // without putting a beat back under it.
-sweepSub(15.10, 0.86, 30, 62, 0.60);
+sweepSub(newT(15.10), 0.86, 30, 62, 0.60);
 
 // ── the alerts ──────────────────────────────────────────────────────────────
 // One bell per card, a fifth apart, rising — and on an ACCELERATING cadence,
 // 0.47s then 0.40s. Money arriving faster and faster is told entirely through
 // the interval, with no copy at all.
 //
-// THERE ARE THREE, and there used to be four. The fourth rang at 17.40 over
-// nothing at all: SALES in hero/film.html has three entries and SALE_AT has
-// three times, so the last bell was a sound with no picture under it. Bells are
-// picture cues like the clicks; a bell with no card is exactly the kind of thing
-// that makes a soundtrack feel bolted on. The pan is the measured centre of the
-// alert stack (x=1197 of 1920), read out of the DOM the same way the clicks were.
+// FOUR CARDS POP, THREE BELLS RING. The first card lands at 15.92, still
+// inside the bloom's wash and the sub swell — a bell there would fight the
+// wash, so the drumbeat's cadence starts being audible from the second card.
+// Bells are picture cues like the clicks; each of these three has a card
+// landing under it on the exact frame.
 const SALE_AT = [16.20, 16.67, 17.07];
-SALE_AT.forEach((t, i) => chime(t, 587.33 * Math.pow(2, i / 12) * (i > 1 ? 1.5 : 1), 1, 0.20 + i * 0.07));
-on(16.00, 18.01, BAR / 2, (t) => kick(t, 0.62));
-bass(16.00, 65.41, 1.6, 0.7);
+SALE_AT.forEach((t, i) => chime(newT(t), 587.33 * Math.pow(2, i / 12) * (i > 1 ? 1.5 : 1), 1, 0.20 + i * 0.07));
+on(newT(16.00), newT(18.01), BAR / 2, (t) => kick(t, 0.62));
+bass(newT(16.00), 65.41, 1.6, 0.7);
 
 // ── the endcard ─────────────────────────────────────────────────────────────
 // The endcard is a REAL FREEZE — 1.2s of picture with a per-frame delta of
@@ -553,13 +585,13 @@ bass(16.00, 65.41, 1.6, 0.7);
 // the tonic triad one last time — the same string that opened over the title,
 // closing on the chord the whole film has been avoiding. The last thing that
 // happens is a room decaying, which is what an ending sounds like.
-impact(18.16, 0.52, 1.0);
-pluck(18.16, 220.00, 1.0, -0.34, 1.40);
-pluck(18.40, 277.18, 0.86, 0.30, 1.30);
-pluck(18.66, 329.63, 0.74, -0.22, 1.20);
-pluck(18.98, 440.00, 0.58, 0.26, 1.10);
-chime(18.16, 880.00, 0.55, 0.0);
-bass(18.16, 55.00, 1.7, 0.85);
+impact(newT(18.16), 0.52, 1.0);
+pluck(newT(18.16), 220.00, 1.0, -0.34, 1.40);
+pluck(newT(18.40), 277.18, 0.86, 0.30, 1.30);
+pluck(newT(18.66), 329.63, 0.74, -0.22, 1.20);
+pluck(newT(18.98), 440.00, 0.58, 0.26, 1.10);
+chime(newT(18.16), 880.00, 0.55, 0.0);
+bass(newT(18.16), 55.00, 1.7, 0.85);
 
 // ── the room ──────────────────────────────────────────────────────────────────
 // Everything above is dry. A dry synthetic mix is the single loudest tell that
