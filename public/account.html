@@ -8,10 +8,10 @@
   <meta name="robots" content="noindex" />
   <link rel="icon" href="/favicon.ico" sizes="32x32" />
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-  <link rel="icon" type="image/png" sizes="96x96" href="/favicon-96x96.png?v=189" />
-  <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=189" />
+  <link rel="icon" type="image/png" sizes="96x96" href="/favicon-96x96.png?v=190" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=190" />
   <link rel="manifest" href="/site.webmanifest" />
-  <link rel="stylesheet" href="/styles.css?v=189" />
+  <link rel="stylesheet" href="/styles.css?v=190" />
   <style>
     /* Navy night retheme — colors only. Remaps the old "Dues black" monochrome
        tokens from styles.css onto the brand's navy system (the landing page's
@@ -42,33 +42,40 @@
     }
     html:not([data-theme='light']) ::selection { background: rgba(88, 101, 242, 0.45); color: #f2f5fa; }
 
-    /* Day-sky light face — the light blue, not the old off-white. Scoped the
-       same way the navy block is: html[data-theme='light'] only. */
+    /* Light face: a white ground. It was the day sky — a #70a3e6 → #eaf2fb
+       gradient running down the page with a blue-tinted palette on top of it.
+       The fade was decoration the app did not need, and it made every grey in
+       the interface faintly blue. So: white page, white panels separated by
+       their border, and neutral greys underneath. The night face below is
+       deliberately untouched. */
     html[data-theme='light'] {
-      --bg: #e9f1fb;                       /* clearly light-blue ground */
+      --bg: #ffffff;
       --panel: #ffffff;
-      --panel-hover: #f2f7fd;
-      --edge: #cfdff2;
+      --panel-hover: #f6f7f9;
+      --edge: #e3e5ea;
       --edge-selected: #5865f2;
       --ink: #0f1626;
-      --dim: #46536e;
+      --dim: #57606f;
       --accent: #5865f2;
       --accent-hot: #4752e8;
       --accent-ink: #ffffff;
-      --well: #ddeaf8;
-      --raised: #f3f8fd;
-      --hairline: #dbe7f5;
-      --hairline-2: #cfdff2;
-      --edge-hot: #a9c3e2;
-      --active-fill: #dce9f8;
-      --faint: #93a7c4;
+      --well: #f4f5f7;
+      --raised: #fafbfc;
+      --hairline: #ececf0;
+      --hairline-2: #e3e5ea;
+      --edge-hot: #c3c7d0;
+      /* the chosen chip of a segmented control: white lifted off the grey well */
+      --active-fill: #ffffff;
+      --faint: #949aa6;
       --solid: #5865f2;
       --solid-ink: #ffffff;
       --good: #177245;
       --money: #177245;
     }
-    /* a whisper of sky at the top of the page ground */
-    html[data-theme='light'] body { background: linear-gradient(180deg, #70a3e6 0%, #adceed 380px, #eaf2fb 760px) fixed; }
+    html[data-theme='light'] body { background: #ffffff; }
+    /* the strip that paints the iOS status bar matches the page ground */
+    html[data-theme='light'] { --ui-tint: #ffffff; }
+    html:not([data-theme='light']) { --ui-tint: #131b2d; }
     /* night ground matches the night homepage sky: #131b2d melting into navy */
     html:not([data-theme='light']) body { background: linear-gradient(180deg, #131b2d 0%, #101827 420px) fixed; }
     html[data-theme='light'] ::selection { background: rgba(88, 101, 242, 0.25); color: #0f1626; }
@@ -86,12 +93,13 @@
     html:not([data-theme='light']) .btn-secondary:focus-visible,
     html:not([data-theme='light']) .powered-community:focus-visible { outline-color: #5865f2; }
   </style>
-  <script src="/theme.js?v=189"></script>
+  <script src="/theme.js?v=190"></script>
 </head>
 <body>
+<i class="ui-tint" aria-hidden="true"></i>
   <header class="top">
     <div class="top-left">
-      <a href="/"><img class="platform-mark" src="/dues.png?v=189" alt="Dues" height="20" /></a>
+      <a href="/"><img class="platform-mark" src="/dues.png?v=190" alt="Dues" height="20" /></a>
     </div>
     <div class="top-right">
       <div id="account" class="account"></div>
@@ -109,9 +117,9 @@
 
   <footer>
     <span class="powered-label">Powered by:</span>
-    <img class="powered-mark" src="/dues.png?v=189" alt="Dues" height="18" />
+    <img class="powered-mark" src="/dues.png?v=190" alt="Dues" height="18" />
   </footer>
 
-  <script src="/account.js?v=189"></script>
+  <script src="/account.js?v=190"></script>
 </body>
 </html>

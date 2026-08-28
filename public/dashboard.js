@@ -687,7 +687,11 @@ function renderLive(g, slug) {
 function deltaChip(delta) {
   if (delta === null || delta === undefined) return '';
   const n = Math.abs(delta) >= 100 ? Math.round(Math.abs(delta)) : Math.abs(delta).toFixed(Math.abs(delta) < 10 ? 1 : 0);
-  return `<span class="delta ${delta >= 0 ? 'up' : 'down'}"><span aria-hidden="true">${delta >= 0 ? '▲' : '▼'}</span>${n}%</span>`;
+  // No change is not growth. `delta >= 0 ? up : down` put 0 in the up bucket,
+  // so a day that matched yesterday exactly reported a green ▲0.0% — an
+  // invented result on the one number a seller checks first. Flat says flat.
+  if (Number(n) === 0) return '<span class="delta flat">0%</span>';
+  return `<span class="delta ${delta > 0 ? 'up' : 'down'}"><span aria-hidden="true">${delta > 0 ? '▲' : '▼'}</span>${n}%</span>`;
 }
 
 function statCard(label, value, icon, delta = null, sub = '', spark = '') {
@@ -1247,7 +1251,16 @@ async function renderChecklist(store, slug) {
       }
     }
     const checks = [
-      { ok: true, label: 'Payment method connected — Stripe' },
+      // Was a literal `true`. A seller with no key got a green tick, and
+      // because the panel hides itself once every check passes, the store
+      // that could not take a single payment was the one shown no checklist
+      // at all. The built-in store rides on the platform's own key.
+      {
+        ok: Boolean(store.isDefault || store.hasStripeKey),
+        label: 'Payment method connected — Stripe',
+        href: `#/store/${slug}/settings`,
+        hint: 'Add your Stripe secret key in Settings — until then no one can pay you.',
+      },
       { ok: products.length > 0, label: 'First product created', href: `#/store/${slug}/products` },
       { ok: store.status === 'live' && withRoles.length > 0, label: 'Store published with a role to deliver', href: `#/store/${slug}/products` },
       { ok: rolesOk, label: 'Bot role sits above the roles it delivers', href: null, hint: 'Drag the Dues role higher in Server Settings → Roles.' },
@@ -1837,7 +1850,7 @@ function sectionStore(store, link, paid = true) {
       // by the server anyway, so the controls are disabled rather than merely
       // discouraged, and Reset stays live — undoing never needs a plan.
       body: (paid ? '' : `<div class="lock-note">${I.lock ?? ''}<span><b>Included from Pro.</b> Every colour, all 46 backgrounds, glass and liquid cards, corners and type. Your saved colours are kept while you are on Free — they come straight back when you upgrade.</span><a class="btn-pill" href="#/store/${esc(store.slug)}/billing">See plans</a></div>`)
-        + `<div class="${paid ? '' : 'th-locked'}">${appearanceBody(store)}</div>`,
+        + `<div class="th-wrap${paid ? '' : ' th-locked'}">${appearanceBody(store)}</div>`,
       foot: `<span class="appearance-foot"><button class="btn-pill" id="th-save"${paid ? '' : ' disabled'}>Save appearance</button>
         <button class="btn-ghost" id="th-reset">Reset to default</button>
         <span class="note-help" id="th-note" role="status"></span></span>`,
@@ -2198,6 +2211,16 @@ async function viewStore(slug) {
     const updFade = () => sb.classList.toggle('scroll-more', sb.scrollWidth - sb.clientWidth - sb.scrollLeft > 8);
     sb.addEventListener('scroll', updFade, { passive: true });
     addEventListener('resize', updFade, { passive: true });
+    // Choosing a section re-renders this bar, and a fresh element starts at
+    // scrollLeft 0 — which is how tapping a tab near the end used to leave you
+    // staring at the start of the bar with your own choice off-screen. Centre
+    // the active tab instead. Written straight to scrollLeft rather than via
+    // scrollIntoView: that would also scroll every ancestor, and the ancestor
+    // here is the page.
+    const active = sb.querySelector('.side-item.active');
+    if (active && sb.scrollWidth > sb.clientWidth) {
+      sb.scrollLeft = Math.max(0, active.offsetLeft - (sb.clientWidth - active.offsetWidth) / 2);
+    }
     updFade();
   }
 
@@ -2293,7 +2316,7 @@ async function viewStore(slug) {
       )].join('\n');
       const a = document.createElement('a');
       a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
-      a.download = `ripley-transactions-${slug}-${new Date().toISOString().slice(0, 10)}.csv`;
+      a.download = `dues-transactions-${slug}-${new Date().toISOString().slice(0, 10)}.csv`;
       a.click();
       URL.revokeObjectURL(a.href);
     };

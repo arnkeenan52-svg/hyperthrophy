@@ -22,7 +22,7 @@
   <meta property="og:locale" content="en_US" />
   <meta property="og:title" content="Pricing — Dues" />
   <meta property="og:description" content="0% platform fees. Payments land in your own Stripe account. Roles delivered in seconds." />
-  <meta property="og:image" content="https://dues.gg/og-card.jpg?v=189" />
+  <meta property="og:image" content="https://dues.gg/og-card.jpg?v=190" />
   <meta property="og:image:width" content="1200" />
   <meta property="og:image:height" content="630" />
   <meta property="og:url" content="https://dues.gg/pricing" />
@@ -31,11 +31,11 @@
   <meta name="twitter:site" content="@duesdiscord" />
   <meta name="twitter:title" content="Pricing — Dues" />
   <meta name="twitter:description" content="0% platform fees. Payments land in your own Stripe account. Roles delivered in seconds." />
-  <meta name="twitter:image" content="https://dues.gg/og-card.jpg?v=189" />
+  <meta name="twitter:image" content="https://dues.gg/og-card.jpg?v=190" />
   <link rel="icon" href="/favicon.ico" sizes="32x32" />
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-  <link rel="icon" type="image/png" sizes="96x96" href="/favicon-96x96.png?v=189" />
-  <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=189" />
+  <link rel="icon" type="image/png" sizes="96x96" href="/favicon-96x96.png?v=190" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=190" />
   <link rel="manifest" href="/site.webmanifest" />
   <script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"Dues","url":"https://dues.gg","applicationCategory":"BusinessApplication","operatingSystem":"Web","description":"Discord monetization platform: sell paid roles and memberships with Stripe checkout, 0% platform fees, and payments direct to your own Stripe account.","offers":{"@type":"Offer","price":"0","priceCurrency":"USD","description":"Free up to 10 paying members; flat plans from $14.99/month. 0% of sales."}}</script>
 
@@ -58,7 +58,7 @@
 }
 @font-face{
   font-family:'Plus Jakarta Sans';
-  src:url('/jakarta-latin.woff2?v=189') format('woff2');
+  src:url('/jakarta-latin.woff2?v=190') format('woff2');
   font-weight:200 800;font-style:normal;font-display:block;
 }
 /* Arial re-scaled to Jakarta's metrics: zero layout shift if the woff2 is slow */
@@ -89,6 +89,7 @@
   --cta-ink:#fff;
   --scrim:13,20,32;
   --sky-fallback:#131b2d;
+  --ui-tint:#131b2d;
   --r-glass:22px;
   --shadow:0 2px 10px rgba(4,8,18,.45);
   --r-slab:16px;
@@ -121,6 +122,7 @@ html[data-theme="light"]{
   --cta-ink:#fff;
   --scrim:244,247,253;
   --sky-fallback:#70a3e6;
+  --ui-tint:#70a3e6;
   --shadow:0 2px 10px rgba(31,51,86,.12);
 }
 /* theme-invariant guard: the approved blurple pricing slab keeps its light pill in both themes */
@@ -130,6 +132,24 @@ html[data-theme="light"]{
 html{scroll-behavior:auto} /* kit rule: smooth scroll fights the sheet-and-footer reveal */
 html{background:#131b2d}
 html[data-theme="light"]{background:#70a3e6}
+
+/* ── iOS status-bar tint ─────────────────────────────────────────────────
+   Safari 26 stopped reading <meta name="theme-color">. It paints the status
+   bar from the background-color of a FIXED element pinned within a few px of
+   the viewport edge, falling back to <body>. Our header is fixed at top:0
+   with no background-color of its own, so Safari had nothing stable to read
+   and the strip kept whatever it sampled at load — which is why it never
+   followed the day/night toggle. This 4px band is the sample point: full
+   width, pinned to the top, painted behind every layer so it is never seen,
+   and coloured by a token that flips with data-theme. Only WebKit reads it,
+   so it stays out of the render tree everywhere else. ──────────────────── */
+.ui-tint{
+  position:fixed;top:0;left:0;width:100%;height:4px;
+  z-index:-2147483647;pointer-events:none;display:none;
+  background-color:var(--ui-tint);
+}
+@supports (-webkit-touch-callout:none){ .ui-tint{display:block} }
+
 body{
   font-family:var(--sans);
   font-size:16px;line-height:24px;
@@ -229,7 +249,11 @@ h3{font-weight:500}
 html[data-footer-revealed] .nav{opacity:0;pointer-events:none}
 .nav::before{
   content:"";position:absolute;inset:0 0 -28px 0;pointer-events:none;
-  background:linear-gradient(to bottom,rgba(var(--scrim),.96) 0%,rgba(var(--scrim),.88) 62%,rgba(var(--scrim),0) 100%);
+  /* The ramp used to be down to .88 by 62% and gone by 100% — but 100% is 28px
+     BELOW the bar, so the bottom third of the bar itself was barely tinted and
+     page text read straight through it into the wordmark and the toggle. Hold
+     the scrim across the whole 64px band and fade only in the overhang. */
+  background:linear-gradient(to bottom,rgba(var(--scrim),.97) 0%,rgba(var(--scrim),.95) 70%,rgba(var(--scrim),0) 100%);
   opacity:0;transition:opacity .25s ease;
 }
 .nav.scrolled::before{opacity:1}
@@ -244,7 +268,7 @@ html[data-footer-revealed] .nav{opacity:0;pointer-events:none}
 .nav-login{font-size:14.5px;font-weight:500;color:var(--ink);opacity:.85;transition:opacity .2s ease}
 .nav-login:hover{opacity:1}
 .theme-btn{
-  width:38px;height:38px;border-radius:50%;flex:none;
+  width:44px;height:44px;border-radius:50%;flex:none;   /* 44px: the minimum a thumb can hit */
   display:flex;align-items:center;justify-content:center;color:var(--ink);
   background:var(--glass);border:1px solid var(--glass-brd);
   transition:transform 160ms cubic-bezier(.23,1,.32,1),border-color .2s ease;
@@ -342,7 +366,7 @@ html:not([data-theme="light"]) .hero-sub{color:#c6d0e2}
 }
 .film-frame video{
   width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:12px;
-  background:url('/hero-poster.webp?v=189') center/cover;
+  background:url('/hero-poster.webp?v=190') center/cover;
 }
 .browser-bar{
   position:relative;height:34px;
@@ -1208,6 +1232,16 @@ html[data-theme="light"]{
 
 /* --- shared header language (ugc.foundable) --- */
 .sec-eyebrow{font:500 15.5px/1.4 var(--sans);color:var(--gl-blue);margin-bottom:14px}
+/* Text that lands directly on the day sky, with no panel under it. These
+   colours were picked against --paper (#f4f7fd) and are fine there, but the
+   sections carrying them have no background, so they resolve against
+   html[data-theme="light"]{background:#70a3e6}: the eyebrows measured 1.77:1
+   and the payment captions 1.80:1. Darkened only for the light face, only
+   where the sky is what is behind. */
+html[data-theme="light"] .sec-eyebrow{color:#1b2c57}      /* was #5865f2 — 1.77:1, now 5.2:1 */
+html[data-theme="light"] .pay-cap,
+html[data-theme="light"] .pay-note{color:#22314f}         /* was #67748f — 1.80:1, now 5.0:1 */
+html[data-theme="light"] .mid-note{color:#22314f}         /* was #46536e — 2.96:1, now 5.0:1 */
 h2.sec-display{
   font-family:var(--grotesk);font-weight:700;letter-spacing:-.02em;
   font-size:clamp(32px,4vw,52px);line-height:1.08;color:var(--gl-ink);max-width:24ch;
@@ -1650,6 +1684,7 @@ html:not([data-theme="light"]) .plan-note.is-deal{color:#3ddc84}
 </style>
 </head>
 <body>
+<i class="ui-tint" aria-hidden="true"></i>
 
 <!-- 1 · announcement -->
 
@@ -1857,7 +1892,7 @@ html:not([data-theme="light"]) .plan-note.is-deal{color:#3ddc84}
   </div>
 </footer>
 
-<script src="/sky.js?v=189" defer></script>
+<script src="/sky.js?v=190" defer></script>
 <script>
 (function(){
   'use strict';
@@ -1865,25 +1900,40 @@ html:not([data-theme="light"]) .plan-note.is-deal{color:#3ddc84}
 
   /* theme toggle (sun/moon): html[data-theme="light"] = day, absent = night */
   var themeBtn = document.querySelector('[data-theme-toggle]');
+  var tintFrame = 0;
+  var tintWant = function(){
+    return document.documentElement.getAttribute('data-theme') === 'light' ? '#70a3e6' : '#131b2d';
+  };
   function syncThemeMeta(){
-    var light = document.documentElement.getAttribute('data-theme') === 'light';
-    var want = light ? '#70a3e6' : '#131b2d';
-    var old = document.querySelector('meta[name="theme-color"]');
-    if(old && old.getAttribute('content') === want){ return; }
+    var tags = document.querySelectorAll('meta[name="theme-color"]');
+    if(!tintFrame && tags.length === 1 && tags[0].getAttribute('content') === tintWant()){ return; }
     // iOS Safari re-reads theme-color when the tag is REMOVED and a new one
     // is inserted as a SEPARATE mutation. Editing the content attribute does
     // nothing, and replaceWith() is close enough to an edit that WebKit
     // treats it the same way — which is why the band kept the old face after
     // a toggle. Drop it, let that commit, then add the new one next frame.
-    if(old){ old.remove(); }
+    //
+    // The removal is synchronous and the insert is two frames later, so a
+    // second tap inside that gap used to find nothing to remove and schedule
+    // a SECOND insert: two tags, and browsers obey the first in document
+    // order — which was the losing one. So: cancel any insert still pending,
+    // clear EVERY tag rather than the first, and read the wanted colour at
+    // insert time so a burst of taps settles on wherever it stopped.
+    for(var i = 0; i < tags.length; i++){ tags[i].remove(); }
+    if(tintFrame && window.cancelAnimationFrame){ cancelAnimationFrame(tintFrame); }
+    tintFrame = 0;
     var add = function(){
+      tintFrame = 0;
+      var stale = document.querySelectorAll('meta[name="theme-color"]');
+      for(var j = 0; j < stale.length; j++){ stale[j].remove(); }
       var meta = document.createElement('meta');
       meta.setAttribute('name','theme-color');
-      meta.setAttribute('content', want);
+      meta.setAttribute('content', tintWant());
       document.head.appendChild(meta);
     };
-    if(window.requestAnimationFrame){ requestAnimationFrame(function(){ requestAnimationFrame(add); }); }
-    else { add(); }
+    if(window.requestAnimationFrame){
+      tintFrame = requestAnimationFrame(function(){ tintFrame = requestAnimationFrame(add); });
+    } else { add(); }
   }
   syncThemeMeta();
   window.addEventListener('pageshow', function(e){

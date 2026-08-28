@@ -2,7 +2,10 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- viewport-fit=cover is what makes env(safe-area-inset-*) non-zero. Without
+       it the page cannot reserve room for Safari's bottom bar, and the pay
+       button ends up underneath it. -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <!-- og:begin — replaced per store by api/store-page.js so link previews
        (Discord/Twitter/iMessage) carry the store's name and product photo.
        Unfurlers never run JS; only server-rendered tags count. -->
@@ -21,15 +24,17 @@
   <!-- og:end -->
   <link rel="icon" href="/favicon.ico" sizes="32x32" />
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-  <link rel="icon" type="image/png" sizes="96x96" href="/favicon-96x96.png?v=189" />
-  <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=189" />
+  <link rel="icon" type="image/png" sizes="96x96" href="/favicon-96x96.png?v=190" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=190" />
   <link rel="manifest" href="/site.webmanifest" />
-  <link rel="stylesheet" href="/styles.css?v=189" />
+  <link rel="stylesheet" href="/styles.css?v=190" />
 </head>
 <body>
+  <i class="ui-tint" aria-hidden="true"></i>
+  <i class="ui-tint-b" aria-hidden="true"></i>
   <header class="top">
     <div class="top-left">
-      <a href="/"><img class="platform-mark" src="/dues.png?v=189" alt="Dues" height="20" /></a>
+      <a href="/"><img class="platform-mark" src="/dues.png?v=190" alt="Dues" height="20" /></a>
     </div>
     <div id="account" class="account"></div>
   </header>
@@ -48,7 +53,9 @@
         <div class="shop-hero no-banner" id="shop-hero">
           <img class="shop-banner media-fade" id="shop-banner" alt="" hidden onerror="this.hidden = true" onload="this.classList.add('loaded')" />
           <video class="shop-banner media-fade" id="shop-banner-video" hidden autoplay muted loop playsinline disablepictureinpicture aria-hidden="true" onerror="this.hidden = true" onloadeddata="this.classList.add('loaded')"></video>
-          <img class="logo shop-avatar media-fade" id="shop-icon" src="" alt="" width="96" height="96" hidden onload="this.classList.add('loaded')" />
+          <!-- no src attribute: src="" resolves to the page URL, so the browser fetched
+               the whole document again as an image on every load. app.js sets it. -->
+          <img class="logo shop-avatar media-fade" id="shop-icon" alt="" width="96" height="96" hidden onload="this.classList.add('loaded')" />
           <span class="shop-avatar shop-avatar-ph" id="shop-icon-ph" hidden aria-hidden="true"></span>
         </div>
 
@@ -191,10 +198,10 @@
 
   <footer>
     <span class="powered-label">Checkout powered by:</span>
-    <img class="powered-mark" src="/dues.png?v=189" alt="Dues" height="18" />
+    <img class="powered-mark" src="/dues.png?v=190" alt="Dues" height="18" />
     <a class="powered-community" href="https://discord.gg/G6yjsX5qbB" rel="noopener">Join the Dues community</a>
   </footer>
 
-  <script src="/app.js?v=189"></script>
+  <script src="/app.js?v=190"></script>
 </body>
 </html>
