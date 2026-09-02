@@ -85,9 +85,12 @@ partners@nowpayments.io.
 2. Whether `POST /payout/validate-address` answers from an un-whitelisted IP
    (checklist item 10). Call it from the deployed function, not from a laptop.
 3. Whether a wrong-asset or repeated deposit arrives carrying our `order_id`
-   or a null one (see §6, item 3).
-4. That the pay screen's countdown matches the real `expiration_estimate_date`
-   for a fixed-rate payment (see §6, item 1).
+   or a null one, and what `parent_payment_id` it names (see §6, item 3). The
+   handler is built for the documented shape — null order, parent set — and
+   alerts rather than delivering; the sandbox is what turns that from
+   documented into observed.
+4. That a real fixed-rate payment carries `valid_until`, that it is about ten
+   minutes out, and that the pay screen's countdown matches it (see §6, item 1).
 
 ---
 
@@ -296,29 +299,52 @@ payout fee, because the account is set to "withdrawal fee paid by Receiver".
 Everything here is our documentation disagreeing with theirs. None of it is a
 custody or fund-safety break.
 
-### 1. The 10-minute fixed-rate window vs. the 7-day hold — **unresolved, verify in sandbox**
+### 1. The 10-minute fixed-rate window vs. the 7-day hold — **resolved: they are two different windows**
 
-`api/checkout/crypto.js` sets `INVOICE_HOLD_SECONDS = 7 * 86400` and explains:
-"the deposit address stays payable long past [the quote expiry] — a payment is
-only given up on when nothing was sent to it for a week."
-
-That is true of the **standard** flow. We do not use the standard flow. The API
-reference, on `is_fixed_rate` and on `is_fee_paid_by_user`, both say:
+They were never one number, and reading them as one is what cost buyers the
+product. The API reference, on `is_fixed_rate` and on `is_fee_paid_by_user` —
+the two flags every payment here carries — both say:
 
 > the rate of exchange will be frozen for 10 minutes. If there are no incoming
 > payments during this period, **the payment status changes to "expired"**.
 
-Meanwhile the help centre's *Payment statuses* says expired means "no deposit
-at all within 7 days after payment creation". The two are not reconciled
-anywhere in their material.
+while the help centre's *Payment statuses* says expired also covers "no deposit
+at all within 7 days after payment creation", and that a payment "lives for 7
+days - after that, our system will stop tracking it".
 
-If the 10-minute reading is right, our seat-and-discount hold is 1008× longer
-than the invoice it is protecting: a buyer who abandons at the pay screen locks
-a limited seat for a week, until the hourly cron sees `expired` and closes it.
-(The cron does close it — `backfillMissedCryptoSales` marks `DEAD` statuses
-expired — so this self-heals within an hour of the real expiry. It is a
-capacity bug, not a correctness one.) **Test:** create a fixed-rate sandbox
-payment, wait 11 minutes, read its status.
+Both are true of different things:
+
+| window | what it bounds | where it is read |
+| --- | --- | --- |
+| `valid_until` (~10 min here) | how long **this invoice can be paid** | `paymentExpiryAt()` → the seat hold, the discount hold, the buyer's countdown |
+| 7 days from creation | how long the provider keeps **watching the address** | `TRACKING_WINDOW_SECONDS` → how long `backfillMissedCryptoSales()` keeps asking |
+
+`expiration_estimate_date` is neither: their own wording is "expiration date of
+this estimate". We read `valid_until` and fall back to the estimate only when
+it is absent.
+
+What the old single number did: `api/checkout/crypto.js` held the seat and the
+discount use for `7 * 86400`, so an invoice that lapsed at minute ten went on
+holding both for a week; the pay screen said "start the payment again", each
+restart minted another week-long hold, and the third hit `MAX_OPEN_INVOICES`
+— a buyer locked out of a product they never bought, with a seat nobody else
+could buy either. Meanwhile the hourly cron closed the order on `expired`,
+which is the one status where the money is not finished with us: **no callbacks
+are sent after expiry, and deposits can still be received.** A late deposit
+therefore produced no IPN, no grant, no alert, and a sweep that had stopped
+asking.
+
+Now: the hold ends when the provider's own window does, and an `expired` order
+stays open and keeps being polled until the seven days are spent (then it is
+closed). If the seat was taken by someone else in the meantime, the settlement
+re-check answers it the way it answers every late crypto settlement — nothing
+delivered, seller alerted to refund. That trade is deliberate: a certain
+week-long lockout for every other buyer is worse than a rare late one.
+
+**Still worth watching in the sandbox:** that a real fixed-rate payment carries
+`valid_until` at all, and that a deposit made after expiry really does move the
+payment to `finished` on a later `GET /payment/{id}` (the whole backstop rests
+on it).
 
 ### 2. `minimumFor()` asked about the wrong flow — **fixed on this branch**
 
@@ -337,32 +363,43 @@ could act on and send below the real minimum, which produces a `failed` payment
 the provider says usually cannot be refunded. Now sends both flags; pinned in
 `scripts/e2e-test.js`.
 
-### 3. Wrong-asset and repeated deposits arrive as a *different payment* — **unverified, treat as a release blocker**
+### 3. Wrong-asset and repeated deposits arrive as a *different payment* — **fixed**
 
-The header of `src/lib/nowpayments.js` says a buyer who sends the wrong coin
-"has it converted at the current rate and credited anyway", and `settledFiat()`
-/ `paidInRequestedCoin()` are built on reading `actually_paid_at_fiat` off
-**that same payment**.
-
-Their documentation describes something different. Both wrong-asset deposits
-(with auto-processing on) and repeated deposits to the same address produce a
-**new payment with a new `payment_id`**, linked to the original by
-`parent_payment_id` — "Repeated deposits to the same addresses will
-automatically create a new payment with another id" — and their integration
+The header of `src/lib/nowpayments.js` used to say a buyer who sends the wrong
+coin "has it converted at the current rate and credited anyway" — credited to
+the payment the invoice created. Their documentation describes something else.
+Both wrong-asset deposits (with auto-processing on) and repeated deposits to
+the same address produce a **new payment with a new `payment_id`**, linked to
+the original by `parent_payment_id` — "Repeated deposits to the same addresses
+will automatically create a new payment with another id" — carrying
+`"order_id": null` in their own example webhook body, and their integration
 advice is to track `parent_payment_id` and *not* to grant automatically on one.
 
-Nothing in this repository reads `parent_payment_id`. `processNowPayment()`
-resolves everything through our own `order_id`, and their example webhook body
-for such a payment shows `"order_id": null`. If that is what really arrives,
-the follow-up payment reaches our webhook, fails to find an order, logs
-`payment without order_id, ignoring`, and answers 200 — while the money has
-already been forwarded to the seller. The buyer paid and gets nothing, silently.
+`processNowPayment()` resolved everything through our own `order_id`, so that
+IPN logged `payment without order_id, ignoring` and answered 200 while the
+coins were already on their way to the seller: money in, buyer silent, nobody
+told. What it does now:
 
-The money is safe (it went to the seller, never to Dues). The delivery is not.
-**Test in the sandbox before release:** create a payment, trigger a re-deposit,
-and record what `order_id` and `parent_payment_id` the follow-up IPN carries.
-If `order_id` is null, the webhook needs a `parent_payment_id` fallback that
-re-reads the parent to find the order.
+| the deposit | what happens |
+| --- | --- |
+| its parent order is **already delivered** | nothing granted; the seller is alerted once — "Extra crypto payment — not a new sale", with the child payment id and the coin, so they can refund it or place it by hand |
+| its parent order is **still open** (the top-up, and the wrong-coin case) | nothing granted and the order is **left open**; the seller is alerted — the money arrived, the order did not complete, finishing it is their call in the NOWPayments dashboard or from Members |
+| it resolves to **no order of ours** | the platform's own notification channel is alerted with the payment id: only the dashboard holds the deposit address that says whose it was |
+
+Never delivered automatically, in any of the three: the provider says "We do
+not recommend configuring your system to automatically provide services or ship
+goods based on any repeated-deposit status", and a child payment carries no
+price of its own from which anything here could work out whether the order is
+now covered. The parent is re-read from the API for the walk — the IPN body is
+trusted for the parent id and nothing else. Pinned in `scripts/e2e-test.js`
+("a second deposit on a delivered order", "a wrong-coin deposit is a CHILD
+payment", "resolves to no order of ours"), whose mock now mints child payments
+the way the provider documents them.
+
+**Still worth a sandbox run before release:** create a payment, trigger a
+re-deposit, and record what `order_id` and `parent_payment_id` the follow-up
+IPN really carries. This is written to the documentation, not to an
+observation.
 
 ### 4. `listPayments()` is dead code that would not work — **cosmetic**
 

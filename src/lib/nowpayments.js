@@ -17,9 +17,30 @@
 //   Short-payment default      Partially Paid
 //   Withdrawal fee             paid by Receiver (the seller nets the payout
 //                                    minus the on-chain fee)
-//   Wrong-asset auto-process   ON   (a buyer who sends the wrong coin to the
-//                                    invoice address has it converted at the
-//                                    current rate instead of bounced)
+//   Wrong-asset auto-process   ON   (a buyer who sends a coin the invoice was
+//                                    not created for has the deposit processed
+//                                    instead of bounced — but NOT against that
+//                                    invoice. See below.)
+//
+// WHAT AN EXTRA DEPOSIT ACTUALLY DOES, AND WHY IT IS NOT THIS PAYMENT.
+//
+// The header used to say a wrong-asset deposit was "converted at the current
+// rate and credited anyway" — meaning credited to the payment the invoice
+// created. That is not what the provider documents. A second transfer to a
+// deposit address it has already used, and a deposit in a coin the invoice
+// was not created for, are the same machinery: "Repeated deposits to the same
+// addresses will automatically create a new payment with another id". The new
+// payment names the original in `parent_payment_id` and carries
+// `"order_id": null` — their own example webhook body for one does. The
+// original payment does not move: an underpaid one stays `partially_paid`
+// however much arrives afterwards.
+//
+// So money can reach the seller under a payment id this app never created,
+// for an order it can only find by walking parent_payment_id back to the
+// invoice. src/services/nowpayments-events.js does that walk, and never
+// delivers on the result: the API docs say "We do not recommend configuring
+// your system to automatically provide services or ship goods based on any
+// repeated-deposit status". The seller is told instead.
 //
 // WHAT THE PROVIDER'S OWN DOCUMENTATION SAYS, AND WHAT IT DOES NOT.
 //
@@ -279,6 +300,46 @@ export async function createPayment({ plan, store, amount, payCurrency, orderId 
 
 export const getPayment = (id) => npFetch(`/payment/${encodeURIComponent(id)}`);
 
+// WHEN DOES THIS PAYMENT STOP BEING PAYABLE?
+//
+// Two documented fields, and they are not the same instant:
+//
+//   valid_until                "This parameter indicated when payment go
+//                              expired" — the PAYMENT's own deadline.
+//   expiration_estimate_date   "expiration date of this estimate",
+//                              "Estimate validity period" — the QUOTE's.
+//
+// Reading the estimate as the payment's life is how a ten-minute invoice was
+// taken for a week-long one. Every payment created here is fixed-rate with the
+// fee paid by the buyer, and the provider attaches the same note to both
+// flags: "the rate of exchange will be frozen for 10 minutes. If there are no
+// incoming payments during this period, the payment status changes to
+// 'expired'". So the payment's deadline is minutes, not days — read the field
+// that says so, and fall back to the estimate only when it is absent.
+//
+// Answers unix seconds, or null when the payment carries neither field (the
+// caller decides what to assume, and says so where it decides it).
+export function paymentExpiryAt(payment) {
+  for (const raw of [payment?.valid_until, payment?.expiration_estimate_date]) {
+    if (raw === null || raw === undefined || raw === '') continue;
+    // A number is already epoch — seconds or milliseconds, both of which the
+    // provider's fields have been seen in — and Date.parse would reject it.
+    const n = typeof raw === 'number' ? raw : Number.NaN;
+    const ms = Number.isFinite(n) ? (n > 1e11 ? n : n * 1000) : Date.parse(String(raw));
+    if (Number.isFinite(ms)) return Math.floor(ms / 1000);
+  }
+  return null;
+}
+
+// How long the provider itself keeps watching a payment's deposit address:
+// payments "live for 7 days - after that, our system will stop tracking it",
+// and `expired` is the status of one with "no deposit at all within 7 days
+// after payment creation". That is the honest ceiling on how long a deposit
+// can still turn up on an invoice whose quote lapsed — and, because "no
+// callbacks are sent after a payment expires", the whole window in which our
+// own polling is the only thing that can find that money.
+export const TRACKING_WINDOW_SECONDS = 7 * 86400;
+
 // Recon reads PAYMENTS, never the balance: this is the list of what was
 // forwarded, not of what is being held. (See rule 2 at the top.)
 //
@@ -318,7 +379,20 @@ export const SHORT = new Set(['partially_paid']);
 // saying "Checking on this payment…", and whose seat the backfill never
 // released until the seven-day window dropped it.
 // https://nowpayments.zendesk.com/hc/en-us/articles/18395434917149-Payment-statuses
-export const DEAD = new Set(['failed', 'refunded', 'expired', 'cancelled', 'canceled']);
+//
+// `expired` is the one of those that is not the end of the MONEY. The same
+// article that defines it says a deposit can still arrive afterwards, and the
+// help centre says the provider will keep watching the address for seven days
+// from creation — while sending nothing: "no callbacks are sent after a
+// payment expires. Deposits can still be received, but they will not trigger
+// any further IPN callbacks." So an expired invoice is a closed WINDOW (no
+// seat held, no discount use held, nothing counted against the buyer's cap)
+// and an OPEN order: the backfill keeps asking about it, because it is the
+// only thing that can find a deposit nobody will be told about. Closing the
+// order on `expired` — which is what this rail used to do — is what turned
+// that money into a payment with no role, no alert and nothing still looking.
+export const LAPSED = new Set(['expired']);
+export const DEAD = new Set(['failed', 'refunded', 'cancelled', 'canceled', ...LAPSED]);
 
 // Mirrors the dashboard's "Payment covering" setting. Used ONLY for wording
 // and for recon logging — never to decide whether something is paid.
@@ -332,12 +406,13 @@ const num = (v) => {
 // What actually landed, expressed in the ORDER's own fiat currency, or null
 // when nothing here can say.
 //
-// Wrong-asset auto-processing is ON, so the coin that arrives is not
-// necessarily `pay_currency`: a buyer who sends the wrong token to the
-// invoice address has it converted at the current rate and credited anyway.
-// That makes `actually_paid` — denominated in the coin the invoice ASKED for —
-// the wrong thing to reason about on its own. `actually_paid_at_fiat` is the
-// value of what genuinely arrived, and it is the ONLY field that says so.
+// `actually_paid` is denominated in the coin the invoice ASKED for, which is
+// not the same question as what the deposit was worth: the rate moves, a
+// fixed-rate quote expires, and the deposit that lands against a payment need
+// not be the one it was quoted for. `actually_paid_at_fiat` is the value the
+// provider put on what arrived, and it is the ONLY field that says so.
+// (A deposit in the wrong coin does not land here at all — it becomes its own
+// child payment; see the header.)
 //
 // There used to be a ratio fallback, `(actually_paid / pay_amount) * price`,
 // for payments that arrive without it. That is the wrong-asset assumption
@@ -421,6 +496,15 @@ export function describeStatus(p, { currency } = {}) {
     return { state: 'short', message: `Underpaid — the amount received was below the order total. ${TOP_UP}` };
   }
   if (IN_FLIGHT.has(s)) return { state: 'pending', message: 'Confirming on-chain…' };
+  // Not "did not complete": the address is still watched for a week, so a
+  // buyer who already sent it must not be told the payment failed and go and
+  // send it a second time.
+  if (LAPSED.has(s)) {
+    return {
+      state: 'dead',
+      message: 'This payment window has closed — start again for a fresh amount. If you already sent it, do not send it again: it still reaches the seller and your access follows.',
+    };
+  }
   if (DEAD.has(s)) return { state: 'dead', message: 'This payment did not complete.' };
   // A status none of the sets know (or none at all) is not an on-chain
   // confirmation in progress — claiming one would tell the buyer the money
