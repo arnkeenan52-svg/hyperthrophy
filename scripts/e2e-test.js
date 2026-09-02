@@ -1149,46 +1149,36 @@ test('the favicon is square, big enough for search surfaces, and at a url that d
   }
 });
 
-test('the free look: every background on every plan, an imported URL on a paid one', async () => {
+test('the look is free: every background and an imported URL, on every plan', async () => {
   const theme = await import('../src/lib/theme.js');
-  // The line has to fall in the same place in three places or it is not a
-  // line: the server that strips a look, the picker that offers one, and the
-  // page that sells the difference.
+  // There is no paid part of a look any more, so there is no usesPaidLook /
+  // freeLook pair to keep honest. What has to stay true is that the picker,
+  // the server and the price page all describe the same deal.
   const total = Object.keys(theme.BG_PRESETS).length;
   assert.equal(theme.FREE_BG_PRESETS.length, total, 'every preset in the catalogue is free');
-  for (const id of Object.keys(theme.BG_PRESETS)) {
-    assert.equal(theme.usesPaidLook({ bgPreset: id }), false, `${id} must be free — the catalogue is served from this origin`);
-  }
-  assert.equal(theme.usesPaidLook({ bgUrl: 'https://example.com/a.gif' }), true, "an image from the seller's own host is the paid part");
-  assert.equal(theme.usesPaidLook({ bg: '#0a0a0a', accent: '#ededed', radius: 4 }), false, 'colours alone are free');
+  assert.equal(theme.usesPaidLook, undefined, 'the paid-look gate is gone, not left answering "allowed"');
+  assert.equal(theme.freeLook, undefined, 'and so is the stripper that went with it');
+  const billing = await import('../src/services/billing.js');
+  assert.equal(typeof billing.storeTheme, 'function', "the render path asks for the store's look, not for its plan");
+  assert.equal(billing.themeIfPaid, undefined, 'the old name would be a lie');
 
-  // Stripping keeps everything a free store is entitled to and nothing more.
-  const stripped = theme.freeLook({ bg: '#123456', panel: '#222222', text: '#ffffff', accent: '#ff0000',
-    pay: '#5865f2', radius: 8, font: 'serif', material: 'liquid', bgPreset: 'starfield', bgUrl: 'https://e.com/x.mp4' });
-  assert.deepEqual(stripped, { bg: '#123456', panel: '#222222', text: '#ffffff', accent: '#ff0000',
-    pay: '#5865f2', radius: 8, font: 'serif', material: 'liquid', bgPreset: 'starfield' },
-    'the whole look survives a lapsed plan; only the import does not');
-  assert.deepEqual(theme.freeLook({ bg: '#000000', bgPreset: 'clouds-day' }), { bg: '#000000', bgPreset: 'clouds-day' },
-    'a photographic ground is left alone');
-
-  // The picker must not lock what the server serves to everyone.
+  // The picker must not lock anything, and the two catalogues must agree.
   const dash = fs.readFileSync(new URL('../public/dashboard.js', import.meta.url), 'utf8');
   const catalogue = dash.match(/const BG_CATALOG = \[[\s\S]*?\n\];/)[0];
   const ids = [...catalogue.matchAll(/\{ id: '([a-z0-9-]+)'/g)].map((m) => m[1]).sort();
   assert.deepEqual(ids, [...theme.FREE_BG_PRESETS].sort(), 'the picker and the server must offer the same catalogue');
   assert.doesNotMatch(catalogue, /free:\s*true/, 'no entry needs a free flag any more — they all are');
   assert.doesNotMatch(dash, /bgp-lock">Pro/, 'no wallpaper tile may wear a Pro lock');
+  assert.doesNotMatch(dash, /bgp-url-row\${/, 'the import field is not conditionally locked');
+  assert.doesNotMatch(dash, /canCustomise/, 'the dashboard does not ask whether a look is allowed');
 
-  // And the price page must advertise the deal Free actually gets.
+  // And every price card advertises the same look, because every plan gets it.
   const pricing = fs.readFileSync(new URL('../public/pricing.html', import.meta.url), 'utf8');
   const cards = pricing.split(/<div class="plan(?: plan-pop)?">/).slice(1);
-  const freeCard = cards.find((c) => /<b>Free<\/b>/.test(c));
-  assert.ok(freeCard, 'the pricing page must still have a Free card');
-  const freeLook = freeCard.match(/class="plan-look">([^<]*)</)?.[1] ?? '';
-  assert.match(freeLook, new RegExp(`\\b${total}\\b`), `Free gets all ${total} backgrounds and the page must say so`);
-  const paid = cards.filter((c) => !/<b>Free<\/b>/.test(c)).map((c) => c.match(/class="plan-look">([^<]*)</)?.[1] ?? '');
-  assert.ok(paid.length >= 2 && paid.every((t) => new RegExp(`\\b${total}\\b`).test(t) && /URL/i.test(t)),
-    `every paid plan advertises all ${total} backgrounds plus the import`);
+  assert.ok(cards.length >= 3, 'the pricing page still has its plan cards');
+  const looks = cards.map((c) => c.match(/class="plan-look">([^<]*)</)?.[1] ?? '');
+  assert.ok(looks.every((t) => new RegExp(`\\b${total}\\b`).test(t) && /URL/i.test(t)),
+    `every plan, Free included, advertises all ${total} backgrounds plus the import — got ${JSON.stringify(looks)}`);
 });
 
 test('landing polish holds: one gutter, centred community CTA, Cash App logotype, comments that match the code', () => {
@@ -1230,9 +1220,21 @@ test('landing polish holds: one gutter, centred community CTA, Cash App logotype
     }
   }
   assert.equal(gutters.index, gutters.pricing, 'the landing and /pricing share one gutter at both widths');
-  // the payment strip sits between .why and .how; it is only in line with them
-  // because it is a .wrap too, not because it repeats the number.
-  assert.match(index, /<section class="pay wrap">/, 'the payment strip takes its gutter from .wrap');
+  // the payment strip is no longer a section of its own: it closes "How it
+  // works", so it inherits that section's .wrap gutter rather than declaring
+  // one. What has to hold is that it never grows its own horizontal padding.
+  assert.match(index, /<section class="how wrap" id="how">[\s\S]*?<div class="pay">[\s\S]*?<\/section>/,
+    'the payment strip lives inside How it works and takes that section\'s gutter');
+  assert.doesNotMatch(index, /<section class="pay/, 'the payment strip is not a section of its own');
+  // and it is off the walk above now, so its own rules are checked here — the
+  // night face's `html:not(...) .pay` panel is exempt for the same reason the
+  // walk exempts compounds: that one is a card treatment, not the page gutter.
+  const payRules = [...css.matchAll(/(?:^|[{,])\s*\.pay\{([^}]*)\}/gm)];
+  assert.ok(payRules.length, '.pay still has a rule');
+  for (const r of payRules) {
+    assert.doesNotMatch(r[1], /(^|;)\s*padding(-inline|-left|-right)?\s*:/,
+      '.pay must not grow a horizontal gutter of its own inside How it works');
+  }
 
   // The community card centres everything; its one CTA is inside a flex row
   // with no justify-content, so it pinned to flex-start under centred copy.
@@ -1270,6 +1272,101 @@ test('landing polish holds: one gutter, centred community CTA, Cash App logotype
   const probe = (s) => s.slice(s.indexOf('// the LARGE viewport height'), s.indexOf('var largeVh = function'));
   assert.ok(probe(index).length > 200, 'index carries the viewport probe block');
   assert.equal(probe(index), probe(pricing), 'index and pricing share one viewport-probe block, comments included');
+});
+
+test('the landing runs on one type scale, one vertical rhythm and one grid', () => {
+  // The page had been tuned section by section and never against itself: eight
+  // section-heading sizes (84/52/52/44/42/38/34/27), seven small-copy sizes,
+  // four eyebrow trackings, seven different section boundaries between 52 and
+  // 104px, and four centred column widths (1344/940/900/820). One class even
+  // rendered in two typefaces — .sec-display fell through to the generic
+  // h1,h2,h3 rule inside .mid-head (Space Grotesk 700) while .faq-head h2 was
+  // named in the Jakarta list, so "What sellers say." and "Questions,
+  // answered." were set differently on the same page.
+  //
+  // This reads the sheet the way the cascade does — last declaration wins —
+  // and holds every one of those to a token, so the next tweak to one section
+  // cannot quietly desynchronise it from the other seven.
+  const index = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const css = index.slice(index.indexOf('<style>'), index.indexOf('</style>')).replace(/\/\*[\s\S]*?\*\//g, '');
+
+  // flatten the sheet to (selector, body) pairs; at-rule preludes are stepped
+  // over, so a rule inside a media query counts exactly where it is written.
+  const rules = [];
+  for (let i = 0; i < css.length;) {
+    const open = css.indexOf('{', i);
+    if (open < 0) break;
+    // a stray '}' can lead the slice when the previous rule was nested (an
+    // at-rule body), so it is trimmed off along with the whitespace.
+    const sel = css.slice(i, open).replace(/^[\s}]+/, '').trim();
+    if (/^@(media|supports|keyframes)/.test(sel)) { i = open + 1; continue; }
+    const close = css.indexOf('}', open);
+    if (close < 0) break;
+    rules.push({ sel, body: css.slice(open + 1, close) });
+    i = close + 1;
+  }
+  const last = (selector, prop) => {
+    let value = null;
+    for (const r of rules) {
+      if (!r.sel.split(',').some((s) => s.trim() === selector)) continue;
+      const hits = [...r.body.matchAll(new RegExp(`(?:^|;)\\s*${prop}\\s*:\\s*([^;]+)`, 'g'))];
+      if (hits.length) value = hits[hits.length - 1][1].trim();
+    }
+    return value;
+  };
+
+  // every token is declared once, in one place
+  for (const t of ['--t-display', '--t-title', '--t-sub', '--t-lead', '--t-body', '--t-note', '--t-micro',
+    '--sec-y', '--sec-y-tight', '--sec-head-gap', '--measure', '--measure-wide']) {
+    const declared = [...css.matchAll(new RegExp(`(?:^|[;{\\s])${t}\\s*:`, 'g'))].length;
+    assert.equal(declared, 1, `${t} is declared exactly once`);
+  }
+
+  // ONE section heading, whatever the section is called
+  for (const h of ['.save-head h2', '.why-title', '.how-title', 'h2.sec-display']) {
+    assert.equal(last(h, 'font-size'), 'var(--t-title)', `${h} takes the one section-heading step`);
+  }
+  assert.equal(last('.hero h1', 'font-size'), 'var(--t-display)', 'the hero takes the display step');
+  // and the closer is no larger than the hero it answers
+  assert.match(last('.footer-title', 'font-size') || '', /74px\)$/, 'the closer tops out at the display step');
+  for (const s of ['.save-card h2', '.comm-txt h2']) {
+    assert.equal(last(s, 'font-size'), 'var(--t-sub)', `${s} takes the in-card heading step`);
+  }
+
+  // ONE uppercase label: one size, one weight, one tracking
+  for (const s of ['.marq-cap', '.pay-cap', '.sec-eyebrow', '.save-rows-cap', '.save-cap']) {
+    assert.match(last(s, 'font') || '', /600 var\(--t-micro\)/, `${s} takes the one micro-label step`);
+    assert.equal(last(s, 'letter-spacing'), '.1em', `${s} takes the one micro-label tracking`);
+  }
+
+  // ONE body step and ONE note step
+  for (const s of ['.save-head p', '.save-sub', '.trio-item p', '.comm-txt>p', '.mid-note', '.acc-a p', '.faq-card p']) {
+    assert.equal(last(s, 'font-size'), 'var(--t-body)', `${s} takes the one body step`);
+  }
+  for (const s of ['.hero .microcopy', '.fee-note', '.pay-note', '.save-hero small']) {
+    assert.equal(last(s, 'font-size'), 'var(--t-note)', `${s} takes the one note step`);
+  }
+
+  // TWO section boundaries, and no third. Every section's block padding is
+  // written in the rhythm tokens, so the gap between any two of them is either
+  // 2x--sec-y (a new movement) or 2x--sec-y-tight (inside the fee argument).
+  for (const s of ['.rolemarq', '.save', '.why', '.pay', '.how', '.voices', '.comm', '.faq']) {
+    const pad = last(s, 'padding-block');
+    assert.ok(pad, `${s} sets its own block rhythm`);
+    assert.doesNotMatch(pad, /\d+px/, `${s} spends the rhythm tokens, not a hand-picked px value (${pad})`);
+    assert.match(pad, /var\(--sec-y(-tight)?\)/, `${s} spends the rhythm tokens`);
+  }
+
+  // ONE reading column, ONE multi-column measure — four widths became two
+  for (const s of ['.acc', '.faq-card']) {
+    assert.equal(last(s, 'max-width'), 'var(--measure)', `${s} sits in the reading column`);
+  }
+  for (const s of ['.save-card', '.comm-card']) {
+    assert.match(last(s, 'width') || '', /min\(var\(--measure\),100%\)/, `${s} sits in the reading column`);
+  }
+  for (const s of ['.trio', '.voices-stage']) {
+    assert.equal(last(s, 'max-width'), 'var(--measure-wide)', `${s} sits in the multi-column measure`);
+  }
 });
 
 test('one nav: every page in the site shows the same header links, in the same order', () => {
@@ -3941,8 +4038,17 @@ test('store themes: a light colour way inverts the white wordmark', async () => 
   assert.ok(themeCss({ bg: '#faf9f7' }).includes(invert), 'Ivory ground: the white mark would vanish, so it inverts');
   assert.ok(themeCss({ bg: '#ffffff' }).includes(invert));
   assert.ok(!themeCss({ bg: '#0a0a0a' }).includes(invert), 'a dark ground keeps the white mark');
-  assert.ok(!themeCss({ bg: '#faf9f7', bgPreset: 'midnight' }).includes(invert), 'with a background layer the ground is the layer, not --bg');
-  assert.ok(!themeCss({ bg: '#faf9f7', bgUrl: 'https://example.com/bg.gif' }).includes(invert));
+  // Over a wallpaper the mark sits on the CHROME, and the chrome is 68% of
+  // --bg — not the photograph. So --bg still decides, and a light-tone preset
+  // (which sets data-theme='light' for the column, and with it styles.css's
+  // invert rule) must not blacken the mark on a dark store: sakura and mint
+  // were painting a black wordmark onto a near-black footer bar.
+  assert.ok(themeCss({ bg: '#faf9f7', bgPreset: 'midnight' }).includes('body.has-bg .platform-mark, body.has-bg .powered-mark { filter: invert(1); }'),
+    'a light colour way inverts the mark over a wallpaper too');
+  assert.ok(themeCss({ bg: '#0a0a0a', bgPreset: 'sakura' }).includes('body.has-bg .platform-mark, body.has-bg .powered-mark { filter: none; }'),
+    'a dark colour way keeps the white mark even under a light-tone preset');
+  assert.ok(themeCss({ bg: '#faf9f7', bgUrl: 'https://example.com/bg.gif' }).includes('body.has-bg .platform-mark, body.has-bg .powered-mark { filter: invert(1); }'));
+  assert.ok(!themeCss({ bg: '#0a0a0a', bgPreset: 'sakura' }).includes(invert), 'and never the bare rule, which would lose to data-theme=light');
 });
 
 test('store themes: validated tokens in, server-rendered CSS out', async () => {
@@ -3961,10 +4067,9 @@ test('store themes: validated tokens in, server-rendered CSS out', async () => {
       body: JSON.stringify({ store: 'vip-signals', theme }),
     });
 
-  // THE WHOLE CATALOGUE IS FREE; AN IMPORTED URL IS NOT. A free store may save
-  // every colour, corner, typeface and material, and every background in the
-  // picker — the photographs and the animated grounds included. The one thing
-  // it may not do is point the look at an image on its own host.
+  // A FREE STORE GETS THE WHOLE LOOK. Every colour, corner, typeface and
+  // material, every background in the picker, and an image imported from the
+  // seller's own host. A plan buys member capacity, not a shop window.
   const U7ID = '507700000000000007';
   await tq('DELETE FROM platform_billing WHERE owner_discord_id = ?', [U7ID]);
   assert.equal((await setTheme({ bg: '#071209', accent: '#22c55e', radius: 20 })).status, 200,
@@ -3974,12 +4079,10 @@ test('store themes: validated tokens in, server-rendered CSS out', async () => {
   assert.equal((await setTheme({ bg: '#071209', bgPreset: 'starfield' })).status, 200,
     'and an animated one');
   assert.equal((await setTheme({ bg: '#071209', bgPreset: 'clouds-day' })).status, 200,
-    'and a photographic one — the catalogue is served from this origin, so it costs nothing per store');
-  const freeTry = await setTheme({ bgUrl: 'https://example.com/bg.gif' });
-  assert.equal(freeTry.status, 402, 'a free store cannot import an image from its own host');
-  assert.equal((await freeTry.json()).upgrade, true, 'and the refusal points at the plan');
-  // What a free store saved must survive on the storefront — the gate takes the
-  // import off a look, it does not throw the whole look away.
+    'and a photographic one');
+  assert.equal((await setTheme({ bgUrl: 'https://example.com/bg.gif' })).status, 200,
+    'and an image imported from its own host');
+  // And the storefront shows what the seller saved, on the free plan.
   assert.equal((await setTheme({ bg: '#071209', accent: '#22c55e', bgPreset: 'starfield' })).status, 200);
   const freePub = await (await fetch(`${appUrl}/api/plans?store=vip-signals`)).json();
   assert.equal(freePub.store.theme?.bg, '#071209', 'a free store keeps the colours it chose');
@@ -4027,23 +4130,16 @@ test('store themes: validated tokens in, server-rendered CSS out', async () => {
   assert.match(bgPage, /<div class="store-bg" data-bg="custom"/, 'the imported background is rendered');
   assert.match(bgPage, /<body class="has-bg" data-bg="custom" data-material="liquid">/, 'body carries bg + material');
 
-  // THE PLAN LAPSES. The tokens stay on the row — a cancelled plan parks the
-  // one rented part of a look, it never deletes it — and everything the
-  // platform serves itself stays exactly where it was. Only the imported URL
-  // goes, on BOTH render paths: a write-time gate alone would let an owner
-  // point a store at their own host, cancel, and keep it for nothing.
+  // THE PLAN LAPSES — and the look does not change. Cancelling costs an owner
+  // member capacity, never their shop window, on either render path.
   await tq('DELETE FROM platform_billing WHERE owner_discord_id = ?', [U7ID]);
   const lapsedTheme = (await (await fetch(`${appUrl}/api/plans?store=vip-signals`)).json()).store.theme;
-  assert.equal(lapsedTheme.bgUrl, undefined, 'a lapsed store loses the image it was importing');
-  assert.equal(lapsedTheme.bgPreset, 'aurora', 'but keeps the background it picked — the catalogue is free');
+  assert.match(String(lapsedTheme.bgUrl), /loop\.mp4/, 'a lapsed store keeps the image it imported');
+  assert.equal(lapsedTheme.bgPreset, 'aurora', 'and the background it picked');
   assert.equal(lapsedTheme.material, 'liquid', 'and the rest of the look it set');
   const lapsed = await (await fetch(`${appUrl}/vip-signals`)).text();
   assert.match(lapsed, /id="store-theme"/, 'the colour way is still server-rendered');
-  assert.match(lapsed, /<div class="store-bg" data-bg="aurora"/,
-    'and the picked background takes over from the import that was parked');
-  // The row still holds the import, so re-subscribing restores the exact look.
-  const stillStored = (await tq("SELECT theme FROM stores WHERE slug = 'vip-signals'")).rows[0].theme;
-  assert.match(String(stillStored), /loop\.mp4/, 'the imported url is parked, not deleted');
+  assert.match(lapsed, /<div class="store-bg" data-bg="custom"/, 'and the imported image is still painted');
   // Re-subscribe: the exact same look is back, with nothing re-entered.
   await tq(
     'INSERT INTO platform_billing (owner_discord_id, tier, provider_ref, status, current_period_end, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
@@ -4825,7 +4921,12 @@ test('storefront chrome: hidden wins, touch targets reach 44, phone text floors 
   assert.match(phone, /\.shop-icon-btn \{ width: 44px; height: 44px;/, 'share button is 44px on phones');
   assert.match(phone, /\.shop-btn \{ flex: 1; height: 44px; \}/, 'Join / Follow are 44px on phones');
   assert.match(rules('.menu-btn')[0], /min-width: 44px; min-height: 44px/, 'the /discover hamburger is 44px');
-  assert.match(rules('.shop-mlink')[0], /padding: 4px; margin: -4px;/, 'store links carry a 24px pointer hit box');
+  // A 4px padding sizes the hit box from the ICON, and the seller-link icons
+  // are not square: Discord's 16x12 mark measured 24x20 on a mouse, YouTube's
+  // 18x13 measured 26x21 and TikTok's 15x17 measured 23x25 — three of six
+  // under 24px in one axis. The floor has to be on the BOX, both axes.
+  assert.match(rules('.shop-mlink')[0], /min-width: 24px; min-height: 24px; padding: 4px; margin: -4px;/, 'store links carry a 24px pointer hit box in BOTH axes');
+  assert.match(rules('.shop-mlink')[0], /align-items: center; justify-content: center;/, 'and the icon stays centred in whatever box that makes');
   const touch = css.slice(css.indexOf('@media (pointer: coarse) {'));
   assert.ok(touch.length > 30, 'the touch pass exists');
   assert.match(touch, /\.shop-mlink \{ width: 44px; height: 44px; align-items: center; justify-content: center; margin: -13\.5px; \}/, 'store links reach 44px under a finger');
@@ -4846,7 +4947,15 @@ test('storefront chrome: hidden wins, touch targets reach 44, phone text floors 
 
   // Phone text floor: nothing a buyer reads sits under 12px.
   const px = (body) => [...body.matchAll(/font(?:-size)?:\s*(?:\d+\s+)?([\d.]+)px/g)].map((m) => Number(m[1]));
-  for (const sel of ['.shop-rolechip', '.alt-ours', '.footer-head', '.calc-note', '.calc-bar-sub', '.footer-disclaimer']) {
+  // The list below is every styles.css rule that a BUYER or a VISITOR reads
+  // at a size, measured by rendering each page at 390 and at 1440 and asking
+  // the browser for the computed font-size of every visible text node. What
+  // that sweep does NOT include, deliberately: the miniature type inside the
+  // aria-hidden product mock-ups on the marketing pages (.vz-*, .dc-app,
+  // .browser-url, .appcard, the chart tick labels) — those are a DRAWING of an
+  // interface, not text to read, and scaling their type breaks the drawing.
+  for (const sel of ['.shop-rolechip', '.alt-ours', '.footer-head', '.calc-note', '.calc-bar-sub', '.footer-disclaimer',
+    '.chip', '.order-card .label', '.kicker', '.shop-rv-you', '.shop-share-tip', '.coin span', '.cpay-coin']) {
     const sizes = rules(sel).flatMap(px);
     assert.ok(sizes.length, `${sel} declares a size`);
     assert.ok(sizes.every((n) => n >= 12), `${sel} must not go under 12px (got ${sizes})`);
@@ -4863,6 +4972,22 @@ test('storefront chrome: hidden wins, touch targets reach 44, phone text floors 
     assert.match(html, /\.footer \.fcol b\{[^}]*line-height:1\.1;/, `${file}: footer headings keep their 13px line box`);
   }
   const home = page('index.html');
+  // The rest of what a visitor reads under 12px on the landing page, found by
+  // the same render sweep. .pay-chip b is the load-bearing one: it outranks
+  // every .pm-* class rule below it (the .pm-cashchip comment says so), so
+  // this single number is the size of EVERY wordmark chip on a phone — VISA,
+  // AMEX and both "Pay" marks all measured 11.5px at 390.
+  for (const [re, what] of [
+    [/\.save-rows-cap\{\s*margin:26px 0 14px;font:600 ([\d.]+)px/, 'the calculator column caption'],
+    [/  \.pay-chip b\{font-size:([\d.]+)px\}/, 'the payment wordmark chips on a phone'],
+    [/  \.save-hero small\{margin-top:2px;font-size:([\d.]+)px\}/, 'the savings sub-line on a desktop'],
+    [/  \.sv-name em\{font-size:([\d.]+)px;margin-left:6px\}/, 'the plan tag in the comparison rows'],
+    [/  \.fee-note\{font-size:([\d.]+)px;line-height:17px\}/, 'the fee footnote on a desktop'],
+  ]) {
+    const m = home.match(re);
+    assert.ok(m, `index.html: ${what} must still match ${re}`);
+    assert.ok(Number(m[1]) >= 12, `index.html: ${what} is ${m[1]}px, under the 12px floor`);
+  }
   assert.match(home, /\.pay-cap\{font:600 12px/, 'the payment caption is 12px');
   assert.match(home, /\.save-cap\{display:block;font:600 12px/, 'the savings caption is 12px');
   assert.doesNotMatch(home, /\.save-cap\{font-size:10\.5px\}/, 'no phone override drags it back under');
@@ -4874,7 +4999,17 @@ test('storefront chrome: hidden wins, touch targets reach 44, phone text floors 
   // Store chrome over a wallpaper: header and footer wear the column's
   // translucent ground and the ink, so their text no longer depends on the
   // seller's photo.
-  assert.match(css, /body\.has-bg \.top, body\.has-bg > footer \{\n  background: color-mix\(in srgb, var\(--bg\) 46%, transparent\);/, 'header + footer get the column ground over a wallpaper');
+  //
+  // The STRENGTH of that ground is the whole fix, so it is a number here, not
+  // a string. At 46% a near-white wallpaper still won: measured on the served
+  // storefront with a painted-pixel probe, the dark colour way gave Sign out
+  // 3.43:1 on sakura, 3.56 on mint, 4.39 on lavender, and the "powered by"
+  // line 3.89 on sakura/mint and 4.14 on lavender — four presets, mint and
+  // lavender both FREE tier. At 68% the worst of all forty presets, on both
+  // colour ways, signed in and out, top of page and foot, is 6.75:1.
+  const ground = css.match(/body\.has-bg \.top, body\.has-bg > footer \{\n  background: color-mix\(in srgb, var\(--bg\) (\d+)%, transparent\);/);
+  assert.ok(ground, 'header + footer get the column ground over a wallpaper');
+  assert.ok(Number(ground[1]) >= 68, `the chrome ground is ${ground[1]}%, under the 68% a bright wallpaper needs`);
   assert.doesNotMatch(css, /body\.has-bg \.top \{ background: transparent/, 'the header must not be transparent over a wallpaper');
   assert.match(css, /\nbody\.has-bg > footer, body\.has-bg \.powered-community,\nbody\.has-bg \.top \.nav-link, body\.has-bg \.top \.account, body\.has-bg \.top \.btn-ghost \{ color: var\(--ink\); \}/, 'chrome text over a wallpaper is the ink, not --dim');
 
@@ -4884,15 +5019,95 @@ test('storefront chrome: hidden wins, touch targets reach 44, phone text floors 
   // generator AND in the committed artifacts, so a regenerate that was never
   // run cannot ship the old colour.
   const gen = fs.readFileSync(path.join(ROOT, 'scripts', 'gen-seo-pages.mjs'), 'utf8');
+  //
+  // The list has to cover the rules styles.css applies as well as the ones the
+  // generator writes: .legal a, .faq-item a, .seo-ticks a and .seo-step-num
+  // all paint var(--accent), which on a day page IS #5865f2. Measured on the
+  // served pages before this line existed: /help's "dashboard" link, /terms'
+  // "account page" and "contact@dues.gg", /vs/*'s "fee calculator" and the
+  // 1-2-3 numerals on all six /use-cases/* pages were still the button
+  // blurple at 4.3:1.
   const textLinks = ['--blurple-text: #424cbd;', '.guide-body a { color: var(--blurple-text); }', '.alt-card .seo-card-cta a { color: var(--blurple-text); }',
-    '.seo-card-cta, .cmp-table th:nth-child(2), .calc-label output { color: var(--blurple-text); }'];
+    '.seo-card-cta, .cmp-table th:nth-child(2), .calc-label output { color: var(--blurple-text); }',
+    '.legal a, .faq-item a, .seo-ticks a, .seo-step-num { color: var(--blurple-text); }'];
   for (const line of textLinks) assert.ok(gen.includes(line), `generator paints "${line}"`);
   assert.doesNotMatch(gen, /\.guide-body a \{ color: #5865f2/, 'prose links never go back to the button blurple');
-  for (const seo of ['help.html', 'vs/whop.html', 'tools/whop-fee-calculator.html', 'alternatives/whop-alternatives.html', 'guides/discord-paywall.html']) {
+  for (const seo of ['help.html', 'vs/whop.html', 'use-cases/trading.html', 'tools/whop-fee-calculator.html', 'alternatives/whop-alternatives.html', 'guides/discord-paywall.html']) {
     const html = page(seo);
     for (const line of textLinks) assert.ok(html.includes(line), `${seo} is regenerated with "${line}"`);
   }
+  // terms.html, privacy.html and discover.html are HAND-WRITTEN — the
+  // generator does not own them, which is exactly how /terms kept serving
+  // #5865f2 prose links through a whole generator-only fix. They carry the
+  // same block, and in every one of the five day pages a declaration that
+  // paints #5865f2 as COLOUR must also paint a background, i.e. the blurple
+  // is a fill with white on it, never ink on paper.
+  for (const hand of ['terms.html', 'privacy.html', 'discover.html']) {
+    const html = page(hand);
+    for (const line of textLinks) assert.ok(html.includes(line), `${hand} carries "${line}"`);
+  }
+  for (const day of ['help.html', 'terms.html', 'privacy.html', 'discover.html', 'vs/whop.html', 'use-cases/trading.html']) {
+    const style = page(day).match(/<style>([\s\S]*?)<\/style>/)[1].replace(/\/\*[\s\S]*?\*\//g, '');
+    for (const [, sel, body] of style.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      if (!/(^|[;\s])color:\s*#5865f2/i.test(body)) continue;
+      assert.match(body, /background:/, `${day}: ${sel.trim().slice(0, 60)} paints the button blurple as text`);
+    }
+  }
 });
+
+test('the homepage fold shows the product, and its caption matches the store it photographed', async () => {
+  // The first screen used to be a headline on an empty sky: the page CLAIMED a
+  // buyer pays and a Discord role lands, and showed neither. It now carries two
+  // frames of the running product — the /demo storefront and its checkout —
+  // cut by scripts/build-home-shots.mjs. Three things rot here, and all three
+  // have rotted on this page before: the file goes missing (a broken image at
+  // the top of the site), the shot outlives the product it photographed
+  // (land-storefront.png survived two storefront redesigns and the Ripley
+  // rename before anyone noticed), or the caption drifts off the price it
+  // captions.
+  const home = fs.readFileSync(path.join(ROOT, 'public', 'index.html'), 'utf8');
+  const hero = home.slice(home.indexOf('<header class="hero">'), home.indexOf('<main>'));
+
+  for (const file of ['home-store.webp', 'home-checkout.webp']) {
+    assert.match(
+      hero,
+      new RegExp(`<img src="/${file.replace('.', '\\.')}\\?v=\\d+" width="\\d+" height="\\d+" alt="[^"]{40,}"`),
+      `the fold shows /${file} at its intrinsic size, with alt text that describes it`,
+    );
+    const bytes = fs.readFileSync(path.join(ROOT, 'public', file));
+    assert.equal(
+      bytes.subarray(0, 4).toString('latin1') + bytes.subarray(8, 12).toString('latin1'),
+      'RIFFWEBP',
+      `${file} is a real WebP`,
+    );
+    // A hero image is the one image a phone cannot defer. The pair this
+    // replaced were 1920x1080 PNGs cropped down to a slice in CSS: 130KB down
+    // the wire and ~16MB of decoded bitmap to show it. Nothing in the fold goes
+    // back over 120KB.
+    assert.ok(bytes.length < 120 * 1024, `${file} is ${(bytes.length / 1024) | 0}KB, too heavy for the fold`);
+    assert.equal((await fetch(`${appUrl}/${file}`)).status, 200, `/${file} is served`);
+  }
+
+  // The stale-art guard. The chip beside the frames quotes a price and a role.
+  // Both belong to the demo store the frames were shot from, so editing the
+  // demo catalogue fails here instead of quietly leaving the homepage quoting a
+  // price the store no longer charges.
+  const { demoPlans } = await import('../src/services/demo-store.js');
+  const vip = demoPlans().find((p) => p.id === 'vip-access');
+  const at = hero.indexOf('class="sky-card demo-chip"');
+  assert.ok(at > 0, 'the fold carries the receipt chip');
+  const chip = hero.slice(at, hero.indexOf('</p>', at));
+  assert.ok(chip.includes(`&#36;${vip.priceUsd} paid`), `the chip quotes the demo store's own price ($${vip.priceUsd})`);
+  assert.ok(chip.includes(`&#64;${vip.roleNames[0]} role delivered`), `the chip names the role that product grants (@${vip.roleNames[0]})`);
+  assert.match(hero, /<span class="browser-url">dues\.gg\/demo<\/span>/, 'the storefront frame is labelled with the URL it was shot at');
+
+  // The bouncing chevron went with the empty sky it pointed down: a frame cut
+  // off by the bottom of the screen says "there is more" without an animation
+  // running forever on every visit.
+  assert.doesNotMatch(home, /hero-scrollhint/, 'no scroll hint left behind');
+  assert.doesNotMatch(home, /duesHint/, 'and no keyframes left for it');
+});
+
 
 test('the hosted demo store: fixed storefront at /demo, discount preview works, nothing purchasable', async () => {
   // The page serves with its own head and the Emerald theme server-rendered.

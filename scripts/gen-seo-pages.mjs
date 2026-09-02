@@ -19,7 +19,7 @@ import { config } from '../src/config.js';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PUB = path.join(ROOT, 'public');
 const BASE = 'https://dues.gg';
-const V = '198'; // keep in step with the ?v= asset version on index.html
+const V = '199'; // keep in step with the ?v= asset version on index.html
 // Describes the shared link-preview card (public/og-card.jpg), which is a
 // render of the homepage hero — see scripts/build-og-card.mjs.
 const OG_ALT =
@@ -369,6 +369,15 @@ body.home .disc-hero .kicker { color: rgba(15,22,38,.72); }
 .guide-body a { color: var(--blurple-text); }
 .alt-card .seo-card-cta a { color: var(--blurple-text); }
 .seo-card-cta, .cmp-table th:nth-child(2), .calc-label output { color: var(--blurple-text); }
+/* …and the four styles.css rules that paint TEXT with --accent, which on
+   these pages IS the button blurple: the prose links inside a legal/help
+   card and an FAQ answer, the tick-list links, and the step numerals on the
+   use-case pages. They were missed because the sweep above listed the
+   selectors this generator writes, not the ones styles.css already applies:
+   measured on the served pages, /help's "dashboard" link, /terms' "account
+   page", /vs/*'s "fee calculator" and /use-cases/*'s 1-2-3 numerals were all
+   still #5865f2, 4.3:1 on the paper. */
+.legal a, .faq-item a, .seo-ticks a, .seo-step-num { color: var(--blurple-text); }
 /* "our product" chip on the alternatives lists */
 .alt-ours { background: #5865f2; color: #ffffff; }
 /* search box as glass (discover) */
@@ -378,7 +387,7 @@ body.home .disc-hero .kicker { color: rgba(15,22,38,.72); }
 const nav = `
   <header class="top xoe-nav">
     <div class="top-left">
-      <a href="/"><img class="platform-mark" src="/dues.png?v=198" alt="Dues" height="20" /></a>
+      <a href="/"><img class="platform-mark" src="/dues.png?v=199" alt="Dues" height="20" /></a>
     </div>
     <nav class="top-center" aria-label="Main">
       <a class="nav-link" href="/discover">Discover</a>
@@ -401,7 +410,7 @@ const nav = `
 export const footerHtml = `
   <footer class="site-footer cols seo-footer">
     <div class="footer-brand">
-      <img class="powered-mark" src="/dues.png?v=198" alt="Dues" height="16" />
+      <img class="powered-mark" src="/dues.png?v=199" alt="Dues" height="16" />
       <span class="footer-copy">© Dues</span>
     </div>
     <nav class="footer-col"><span class="footer-head">Product</span>
@@ -498,7 +507,7 @@ function page({ urlPath, title, desc, body, jsonld = [], crumbs = [] }) {
   <link rel="stylesheet" href="/styles.css?v=${V}" />
   <style>${DAY_CSS}</style>
   ${ld}
-  <script src="/theme.js?v=198"></script>
+  <script src="/theme.js?v=199"></script>
 </head>
 <body class="home seo-page">
 <i class="ui-tint" aria-hidden="true"></i>
