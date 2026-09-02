@@ -15,11 +15,15 @@ import { fileURLToPath } from 'node:url';
 // (/api/community) and the receipt email read, so re-issuing it is one edit
 // plus a regenerate rather than a search-and-replace across every page here.
 import { config } from '../src/config.js';
+// The settlement ordering the crypto checkout actually sorts its coin picker
+// by. Imported rather than retyped: /crypto explains this table to sellers,
+// and a hand-written second copy is a page that silently stops being true.
+import { CHAIN_RANK } from '../src/lib/nowpayments.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PUB = path.join(ROOT, 'public');
 const BASE = 'https://dues.gg';
-const V = '206'; // keep in step with the ?v= asset version on index.html
+const V = '207'; // keep in step with the ?v= asset version on index.html
 // Describes the shared link-preview card (public/og-card.jpg), which is a
 // render of the homepage hero — see scripts/build-og-card.mjs.
 const OG_ALT =
@@ -387,7 +391,7 @@ body.home .disc-hero .kicker { color: rgba(15,22,38,.72); }
 const nav = `
   <header class="top xoe-nav">
     <div class="top-left">
-      <a href="/"><img class="platform-mark" src="/dues.png?v=206" alt="Dues" height="20" /></a>
+      <a href="/"><img class="platform-mark" src="/dues.png?v=207" alt="Dues" height="20" /></a>
     </div>
     <nav class="top-center" aria-label="Main">
       <a class="nav-link" href="/discover">Discover</a>
@@ -410,12 +414,12 @@ const nav = `
 export const footerHtml = `
   <footer class="site-footer cols seo-footer">
     <div class="footer-brand">
-      <img class="powered-mark" src="/dues.png?v=206" alt="Dues" height="16" />
+      <img class="powered-mark" src="/dues.png?v=207" alt="Dues" height="16" />
       <span class="footer-copy">© Dues</span>
     </div>
     <nav class="footer-col"><span class="footer-head">Product</span>
       <a href="/discover">Discover stores</a><a href="/pricing">Plans</a><a href="/pricing">Pricing</a><a href="/help">FAQ</a>
-      <a href="/help">Help</a><a href="/dashboard">Dashboard</a><a href="/account">Your account</a>
+      <a href="/help">Help</a><a href="/crypto">Crypto payments</a><a href="/dashboard">Dashboard</a><a href="/account">Your account</a>
       <a href="${config.communityInvite}" rel="noopener">Community Discord</a><a href="mailto:contact@dues.gg">contact@dues.gg</a></nav>
     <nav class="footer-col"><span class="footer-head">Compare</span>
       <a href="/vs/whop">Dues vs Whop</a><a href="/vs/launchpass">Dues vs LaunchPass</a>
@@ -507,7 +511,7 @@ function page({ urlPath, title, desc, body, jsonld = [], crumbs = [] }) {
   <link rel="stylesheet" href="/styles.css?v=${V}" />
   <style>${DAY_CSS}</style>
   ${ld}
-  <script src="/theme.js?v=206"></script>
+  <script src="/theme.js?v=207"></script>
 </head>
 <body class="home seo-page">
 <i class="ui-tint" aria-hidden="true"></i>
@@ -1341,6 +1345,156 @@ ${cta()}`;
 const out = [];
 // ── /help — every feature in two minutes, each card linking to the real thing ─
 
+// ── /crypto ──────────────────────────────────────────────────────────────────
+//
+// The page the payment strip's "See the full list" leads to: every coin and
+// chain a Dues checkout can settle in, each with its own mark, as one list.
+//
+// Everything factual here is read from the code that does the thing. The set
+// of assets is CHAIN_RANK, imported and flattened — the checkout's own table,
+// not a second list retyped here that could drift out of step with it. What
+// this page does NOT do is repeat that table's ORDER as if it were a ranking
+// a seller should read something into: the order is a settlement detail, and
+// on the page it would only read as "these coins are better than those". So
+// the list is alphabetical, and the ordering stays where it belongs, in the
+// picker. A ticker added to CHAIN_RANK with no name or mark here fails the
+// build rather than shipping as a bare string.
+const COIN_NAME = {
+  sol: 'Solana', trx: 'Tron', matic: 'Polygon', base: 'Base', bnb: 'BNB Chain',
+  ltc: 'Litecoin', doge: 'Dogecoin', xrp: 'XRP', ada: 'Cardano', algo: 'Algorand',
+  btc: 'Bitcoin', eth: 'Ethereum', dai: 'Dai',
+  usdtsol: 'USDT on Solana', usdcsol: 'USDC on Solana',
+  usdttrc20: 'USDT on Tron', usdtmatic: 'USDT on Polygon', usdcmatic: 'USDC on Polygon',
+  usdcbase: 'USDC on Base', usdtbsc: 'USDT on BNB Chain', usdcbsc: 'USDC on BNB Chain',
+  usdterc20: 'USDT on Ethereum', usdcerc20: 'USDC on Ethereum',
+};
+// A stablecoin exists on several chains under several tickers and wears ONE
+// mark — Tether's is Tether's whether it settles on Solana or on Ethereum, and
+// the chain is what the name says. So marks are keyed by the asset, and the
+// ticker maps onto one.
+const COIN_ART = (t) => (t.startsWith('usdt') ? 'usdt' : t.startsWith('usdc') ? 'usdc' : t);
+
+// Cardano's mark is a constellation of dots rather than a glyph, so it is
+// placed rather than drawn: three rings around a centre, the way the brand
+// draws it. Written as a loop so the geometry is legible instead of forty
+// hand-typed circles.
+const adaDots = () => {
+  const ring = (n, radius, r, phase = 0) => Array.from({ length: n }, (_, i) => {
+    const a = phase + (i * 2 * Math.PI) / n;
+    return `<circle cx="${(16 + radius * Math.cos(a)).toFixed(2)}" cy="${(16 + radius * Math.sin(a)).toFixed(2)}" r="${r}"/>`;
+  }).join('');
+  return `<circle cx="16" cy="16" r="1.7"/>${ring(6, 4.6, 1.15)}${ring(6, 7.4, 1, Math.PI / 6)}${ring(12, 10.2, .78, Math.PI / 12)}`;
+};
+
+// The marks themselves. Each is the brand's disc in the brand's colour with
+// the brand's own glyph on it, at 32x32, inline so a storefront page never
+// waits on a sprite sheet and never leaks a request to someone else's CDN.
+// The seven card marks on the homepage are drawn the same way for the same
+// reasons — see the .pay strip in public/index.html.
+const COIN_MARK = {
+  btc: '<circle cx="16" cy="16" r="16" fill="#F7931A"/><path fill="#fff" d="M23.19 14.02c.31-2.09-1.28-3.21-3.46-3.96l.71-2.84-1.73-.43-.69 2.76c-.45-.11-.92-.22-1.39-.32l.7-2.78-1.73-.43-.71 2.84c-.38-.09-.75-.17-1.11-.26v-.01l-2.38-.6-.46 1.85s1.28.29 1.25.31c.7.17.83.64.81 1.01l-.81 3.24c.05.01.11.03.18.06l-.18-.05-1.13 4.54c-.09.21-.3.53-.79.41.02.03-1.25-.31-1.25-.31l-.86 1.98 2.25.56c.42.1.83.21 1.23.31l-.72 2.87 1.73.43.71-2.84c.47.13.93.25 1.38.36l-.71 2.83 1.73.43.72-2.87c2.95.56 5.17.33 6.11-2.34.75-2.15-.04-3.39-1.59-4.2 1.13-.26 1.98-1 2.21-2.54zm-3.95 5.55c-.53 2.15-4.16.99-5.34.7l.95-3.81c1.18.3 4.95.88 4.39 3.11zm.54-5.58c-.49 1.96-3.51.96-4.49.72l.86-3.45c.98.25 4.14.7 3.63 2.73z"/>',
+  eth: '<circle cx="16" cy="16" r="16" fill="#627EEA"/><g fill="#fff"><path fill-opacity=".6" d="M16.5 4v8.87l7.5 3.35z"/><path d="M16.5 4 9 16.22l7.5-3.35z"/><path fill-opacity=".6" d="M16.5 21.97V28L24 17.62z"/><path d="M16.5 28v-6.03L9 17.62z"/><path fill-opacity=".2" d="m16.5 20.57 7.5-4.35-7.5-3.35z"/><path fill-opacity=".6" d="M9 16.22l7.5 4.35v-7.7z"/></g>',
+  usdt: '<circle cx="16" cy="16" r="16" fill="#26A17B"/><path fill="#fff" d="M17.92 17.38v-.01c-.11.01-.68.04-1.95.04-1.01 0-1.73-.03-1.98-.04v.01c-3.9-.17-6.81-.85-6.81-1.66s2.91-1.49 6.81-1.66v2.64c.25.02.98.06 1.99.06 1.21 0 1.82-.05 1.93-.06v-2.64c3.89.17 6.79.85 6.79 1.66s-2.9 1.49-6.79 1.66zm0-3.59v-2.36h5.4V7.83H8.68v3.6h5.4v2.36c-4.39.2-7.69 1.07-7.69 2.11s3.3 1.91 7.69 2.11v7.57h3.84v-7.57c4.38-.2 7.67-1.07 7.67-2.11s-3.29-1.9-7.67-2.11z"/>',
+  usdc: '<circle cx="16" cy="16" r="16" fill="#2775CA"/><path fill="#fff" d="M20.5 18.53c0-2.38-1.43-3.2-4.28-3.54-2.04-.27-2.45-.82-2.45-1.77s.68-1.56 2.04-1.56c1.23 0 1.91.41 2.25 1.43.07.2.27.34.48.34h1.09c.27 0 .48-.2.48-.48v-.07a3.42 3.42 0 0 0-3.07-2.79V8.63c0-.27-.2-.48-.55-.55h-1.02c-.27 0-.48.2-.55.55v1.43c-2.04.27-3.34 1.63-3.34 3.34 0 2.25 1.36 3.13 4.22 3.47 1.91.34 2.52.75 2.52 1.84s-.95 1.84-2.25 1.84c-1.77 0-2.38-.75-2.59-1.77-.07-.27-.27-.41-.48-.41h-1.16c-.27 0-.48.2-.48.48v.07c.27 1.7 1.36 2.93 3.61 3.27v1.43c0 .27.2.48.55.55h1.02c.27 0 .48-.2.55-.55v-1.43c2.04-.34 3.41-1.77 3.41-3.61z"/><path fill="#fff" d="M13.1 25.5c-5.31-1.91-8.04-7.84-6.06-13.08a10.1 10.1 0 0 1 6.06-6.06c.27-.14.41-.34.41-.68v-.95c0-.27-.14-.48-.41-.55-.07 0-.2 0-.27.07a12.28 12.28 0 0 0-8.04 15.46 12.2 12.2 0 0 0 8.04 8.04c.27.14.55 0 .61-.27.07-.07.07-.14.07-.27v-.95c0-.2-.2-.48-.41-.61zm6.06-21.18c-.27-.14-.55 0-.61.27-.07.07-.07.14-.07.27v.95c0 .27.2.55.41.68 5.31 1.91 8.04 7.84 6.06 13.08a10.1 10.1 0 0 1-6.06 6.06c-.27.14-.41.34-.41.68v.95c0 .27.14.48.41.55.07 0 .2 0 .27-.07a12.28 12.28 0 0 0 8.04-15.46 12.2 12.2 0 0 0-8.04-8.04z"/>',
+  sol: '<circle cx="16" cy="16" r="16" fill="#0B0B12"/><defs><linearGradient id="cnSol" x1="8" y1="22" x2="24" y2="10" gradientUnits="userSpaceOnUse"><stop stop-color="#9945FF"/><stop offset="1" stop-color="#14F195"/></linearGradient></defs><g fill="url(#cnSol)"><path d="M10.33 19.7a.6.6 0 0 1 .43-.18h13.5c.27 0 .4.33.21.52l-2.66 2.67a.6.6 0 0 1-.43.18H7.88a.3.3 0 0 1-.21-.52z"/><path d="M10.33 9.29a.6.6 0 0 1 .43-.18h13.5c.27 0 .4.33.21.52l-2.66 2.67a.6.6 0 0 1-.43.18H7.88a.3.3 0 0 1-.21-.52z"/><path d="M21.67 14.46a.6.6 0 0 0-.43-.18H7.74a.3.3 0 0 0-.21.52l2.66 2.67c.11.11.27.18.43.18h13.5a.3.3 0 0 0 .21-.52z"/></g>',
+  ltc: '<circle cx="16" cy="16" r="16" fill="#345D9D"/><path fill="#fff" d="m10.43 20.42 1.1-4.15-1.73.65.4-1.5 1.73-.65 2.18-8.2h4.24l-1.62 6.1 1.7-.64-.4 1.5-1.7.63-1.28 4.8h6.9l-.73 2.74H10.6z"/>',
+  doge: '<circle cx="16" cy="16" r="16" fill="#C2A633"/><path fill="#fff" d="M13.15 14.9h3.02v2.24h-3.02v3.9h1.86c.73 0 1.34-.09 1.83-.28.49-.19.87-.46 1.16-.83.29-.37.49-.83.6-1.4.11-.56.17-1.22.17-1.98s-.06-1.42-.17-1.98c-.11-.56-.31-1.03-.6-1.4-.29-.37-.67-.64-1.16-.83-.49-.19-1.1-.28-1.83-.28h-1.86zM10.1 17.14H8.6V14.9h1.5V8.9h5.13c1.2 0 2.24.16 3.13.49.89.33 1.63.8 2.21 1.4.58.6 1.01 1.33 1.3 2.18.29.85.43 1.8.43 2.85s-.14 2-.43 2.85c-.29.85-.72 1.58-1.3 2.18-.58.6-1.32 1.07-2.21 1.4-.89.33-1.93.49-3.13.49H10.1z"/>',
+  xrp: '<circle cx="16" cy="16" r="16" fill="#23292F"/><path fill="#fff" d="M21.9 8.5h2.86l-5.95 5.9a3.98 3.98 0 0 1-5.6 0L7.25 8.5h2.87l4.52 4.48c.75.74 1.97.74 2.72 0zM10.08 23.5H7.22l5.99-5.94a3.98 3.98 0 0 1 5.6 0l5.99 5.94h-2.86l-4.56-4.52a1.93 1.93 0 0 0-2.72 0z"/>',
+  trx: '<circle cx="16" cy="16" r="16" fill="#FF060A"/><path fill="#fff" transform="translate(16 16) scale(.16) translate(-100.8 -96.32)" d="M157.045 79.1207c-5.517-4.9042-13.18-12.3755-19.387-17.6628l-.383-.2299c-.613-.4598-1.303-.8429-2.031-1.1111-15.019-2.682-84.9038-15.2108-86.2448-15.0575-.3831.0383-.7663.1916-1.0728.3831l-.3448.2682c-.4214.4215-.7663.9196-.9578 1.4943l-.0767.2299v1.2643.1916c7.8544 20.9962 38.9272 89.7322 45.0575 105.9002.3831 1.111 1.0728 3.18 2.3755 3.295h.3065c.6896 0 3.6782-3.793 3.6782-3.793s53.3712-61.9922 58.7742-68.5823c.689-.8046 1.302-1.6858 1.839-2.6053.153-.728.076-1.456-.192-2.1456-.268-.6897-.766-1.341-1.341-1.8391zM111.605 86.3621l22.758-18.0843 13.372 11.8008-36.13 6.2835zM102.754 85.1743L63.5586 54.3697l63.4484 11.2261-24.253 19.5785zM106.279 93.2203l40.115-6.2069-45.862 52.9886 5.747-46.7817zM58.233 57.4732l41.2643 33.5249-5.977 49.0419-35.2873-82.5668z"/>',
+  matic: '<circle cx="16" cy="16" r="16" fill="#8247E5"/><path fill="#fff" d="M21.092 12.693c-.369-.215-.848-.215-1.254 0l-2.879 1.654-1.955 1.078-2.879 1.653c-.369.216-.848.216-1.254 0L8.605 15.77c-.369-.215-.627-.61-.627-1.042v-2.582c0-.431.221-.826.627-1.042l2.244-1.258c.369-.216.848-.216 1.254 0l2.244 1.258c.369.215.627.61.627 1.042v1.654l1.955-1.115v-1.653c0-.431-.221-.826-.627-1.042l-4.163-2.372c-.369-.215-.848-.215-1.254 0L6.694 10.03c-.406.216-.627.61-.627 1.042v4.786c0 .431.221.826.627 1.042l4.19 2.372c.37.216.849.216 1.255 0l2.879-1.618 1.955-1.114 2.879-1.617c.369-.216.848-.216 1.254 0l2.244 1.258c.369.215.627.61.627 1.042v2.582c0 .431-.221.826-.627 1.042l-2.244 1.294c-.369.216-.848.216-1.254 0l-2.244-1.258c-.369-.215-.627-.61-.627-1.042V19.19l-1.955 1.115v1.653c0 .431.221.826.627 1.042l4.19 2.372c.37.216.849.216 1.255 0l4.19-2.372c.369-.215.627-.61.627-1.042v-4.822c0-.431-.221-.826-.627-1.042l-4.227-2.401z"/>',
+  base: '<circle cx="16" cy="16" r="16" fill="#0052FF"/><path fill="#fff" d="M9.62 9.65a9 9 0 1 1 0 12.7z"/>',
+  bnb: '<circle cx="16" cy="16" r="16" fill="#F3BA2F"/><path fill="#fff" transform="translate(0 1)" d="M12.116 13.404 16 9.52l3.886 3.886 2.26-2.26L16 5l-6.144 6.144zM6 15l2.26-2.26L10.52 15l-2.26 2.26zm6.116 1.596L16 20.48l3.886-3.886 2.261 2.259L16 25l-6.144-6.144-.003-.003zM21.48 15l2.26-2.26L26 15l-2.26 2.26zm-3.188-.002V15L16 17.294l-2.291-2.29-.004-.004.004-.003.401-.402.195-.195L16 12.706z"/>',
+  ada: `<circle cx="16" cy="16" r="16" fill="#0033AD"/><g fill="#fff">${adaDots()}</g>`,
+  algo: '<circle cx="16" cy="16" r="16" fill="#000"/><path fill="#fff" transform="translate(.5 1)" d="m10.331859 23 7.221238-12.601771.99115 3.256638L13.022125 23h2.83186l3.539822-6.088495L20.951328 23H23.5l-2.40708-9.061945 1.699118-2.973453h-2.548674L19.252216 7h-2.407083L7.5 23Z"/>',
+  dai: '<circle cx="16" cy="16" r="16" fill="#F5AC37"/><g fill="#fff"><path fill-rule="evenodd" d="M11 9h6a7 7 0 0 1 0 14h-6zm2.4 2.4v9.2H17a4.6 4.6 0 0 0 0-9.2z"/><rect x="7.4" y="14.25" width="17.2" height="1.5" rx=".2"/><rect x="7.4" y="17.15" width="17.2" height="1.5" rx=".2"/></g>',
+};
+
+function cryptoPage() {
+  // One flat list, alphabetical, built from the checkout's own table.
+  const coins = CHAIN_RANK.flat().map((t) => {
+    const name = COIN_NAME[t];
+    if (!name) throw new Error(`/crypto: CHAIN_RANK has "${t}" with no name in COIN_NAME — add it`);
+    const mark = COIN_MARK[COIN_ART(t)];
+    if (!mark) throw new Error(`/crypto: "${t}" has no mark in COIN_MARK — draw it, do not ship a bare ticker`);
+    return { ticker: t.toUpperCase(), name, mark };
+  }).sort((a, b) => a.name.localeCompare(b.name, 'en'));
+
+  const list = coins.map((c) => `
+            <li class="cx-coin">
+              <span class="cx-mark" aria-hidden="true"><svg viewBox="0 0 32 32">${c.mark}</svg></span>
+              <span class="cx-name">${esc(c.name)}</span>
+              <span class="cx-tick">${esc(c.ticker)}</span>
+            </li>`).join('');
+  const total = coins.length;
+
+  const faq = [
+    [
+      'Which cryptocurrencies can I accept?',
+      `The ${total} listed on this page. What a buyer is actually offered is read from the crypto rail live at checkout — anything the rail offers beyond this list is still offered, and anything it has switched off does not appear. That is why no page here prints a fixed number of "supported currencies".`,
+    ],
+    [
+      'Which chain should I take payouts on?',
+      'Whichever one you actually hold. A payout is an on-chain transfer and its fee is flat, so on an expensive chain it can cost more than a small membership is worth — that is worth knowing when you pick, and the current cost of a transfer on any chain is the chain’s business, not ours to quote.',
+    ],
+    [
+      'Where does the crypto go?',
+      'To the wallet you nominate, on the chain you nominate. Every payment is created with your payout address on it, and a store with no wallet saved cannot start a crypto checkout at all — Dues refuses rather than take money it would have to hold.',
+    ],
+    [
+      'Do I have to take crypto?',
+      'No. Card checkout runs on your own Stripe account and needs nothing else. Crypto is opt-in per store: it appears only once you have saved a payout wallet and chain.',
+    ],
+  ];
+
+  const body = `
+    <section class="xhero seo-hero">
+      <div class="hero-inner">
+        <h1>Crypto a Dues store can take</h1>
+        <p class="hero-sub">Every coin and chain a Dues checkout can settle in.</p>
+      </div>
+    </section>
+    <section class="xsection">
+      <div class="wrap">
+        <ul class="cx-list">${list}
+        </ul>
+      </div>
+      <div class="wrap narrow guide-body">
+        <p class="crypto-note"><strong>Your buyer&rsquo;s picker is built live.</strong> The coins offered at a checkout are read from the crypto rail at that moment, so a coin the rail has switched off does not appear and cannot be paid to &mdash; and anything the rail offers beyond this list is still offered rather than hidden. That is why no page here prints a round number of &ldquo;supported currencies&rdquo;: the true answer is whatever the rail says when your buyer arrives.</p>
+        <p>A coin that is not enabled on the rail is refused before a payment is ever created, so a buyer cannot be sent to an address for something that would bounce. If the rail cannot be reached at all, the checkout says so rather than showing an empty picker. A store with no payout wallet saved does not offer the option in the first place.</p>
+      </div>
+    </section>
+    <section class="xsection">
+      <div class="wrap narrow guide-body">
+        <h2>Where the money goes</h2>
+        <p>The same place all your money goes on Dues: an account you own. You save a payout wallet and its chain in the dashboard, and every payment is created carrying that address, so settlement is a transfer out to you rather than a balance sitting somewhere with your name on it.</p>
+        <ul>
+          <li><strong>No wallet, no sale.</strong> If a store has crypto switched on but no payout address saved, checkout refuses and says so. Money Dues would have to hold is money Dues will not take.</li>
+          <li><strong>You pick the chain.</strong> The wallet is checked against the real rules of that chain before it saves, and typed a second time to confirm — an on-chain transfer cannot be undone.</li>
+          <li><strong>The role lands on a finished payment.</strong> Not on a pending one, and not on a short one: an underpayment stays open and the seller is told, rather than access being handed out for money that did not fully arrive.</li>
+        </ul>
+        <p>Crypto is opt-in per store, and it is still being rolled out. Until it reaches your store, card checkout is what your buyers see &mdash; on your own Stripe account, at <a href="/pricing">0% platform fee</a>, as always.</p>
+
+        <h2>The rail&rsquo;s own current list</h2>
+        <p>Dues&rsquo; crypto rail is <a href="https://nowpayments.io" rel="noopener">NOWPayments</a>. They publish a per-coin page showing what is available for payments and withdrawals right now, along with each coin&rsquo;s minimum payment amount &mdash; that page, not this one, is the live answer to &ldquo;can I pay in X today?&rdquo;:</p>
+        <ul>
+          <li><a href="https://nowpayments.io/status-page" rel="noopener">nowpayments.io/status-page</a> &mdash; per-coin availability and minimums, updated by the provider.</li>
+        </ul>
+        <p>Minimums matter more than the list does. Every coin has a floor below which a payment cannot be made, it differs per pair, and Dues quotes it from the rail at checkout for the exact pair the buyer is on rather than guessing.</p>
+      </div>
+    </section>
+    <section class="xsection">${faqHtml(faq)}</section>
+${cta('Start selling — cards today, coins when you want them')}`;
+
+  return page({
+    urlPath: '/crypto',
+    title: 'Crypto a Dues store can take',
+    desc: 'Every coin and chain a Dues store can settle in, with how the buyer’s picker is built live at checkout and where the payout lands.',
+    body,
+    jsonld: [faqJsonld(faq)],
+    crumbs: [['Crypto payments', '/crypto']],
+  });
+}
+
 function helpPage() {
   const FEATURES = [
     ['Your store page', 'One link with everything you sell — your name, banner, about section and colors. Buyers browse products and check out without leaving the page.', '/demo', 'See the demo store'],
@@ -1433,6 +1587,7 @@ for (const [slug, g] of Object.entries(GUIDES)) emit(`guides/${slug}.html`, guid
 
 emit('alternatives/index.html', altIndex());
 emit('help.html', helpPage());
+emit('crypto.html', cryptoPage());
 for (const [slug, a] of Object.entries(ALTERNATIVES)) emit(`alternatives/${slug}.html`, altPage(slug, a));
 
 // llms.txt: the emerging convention answer engines read for a site summary.
@@ -1481,6 +1636,7 @@ Key product facts:
 
 ## Help
 - [Every feature explained](${BASE}/help)
+- [Crypto payments: which coins, which chains, where payouts land](${BASE}/crypto)
 
 ## Tools
 - [Discord monetization fee calculator](${BASE}/tools/discord-fee-calculator)
@@ -1499,7 +1655,7 @@ const urls = ['/', '/pricing', '/vs', ...Object.keys(COMPETITORS).map((s) => `/v
   '/use-cases', ...Object.keys(USE_CASES).map((s) => `/use-cases/${s}`),
   '/guides', ...Object.keys(GUIDES).map((s) => `/guides/${s}`),
   '/alternatives', ...Object.keys(ALTERNATIVES).map((s) => `/alternatives/${s}`),
-  '/discover', '/help', '/demo'];
+  '/discover', '/help', '/crypto', '/demo'];
 const today = new Date().toISOString().slice(0, 10);
 emit(
   'sitemap.xml',
