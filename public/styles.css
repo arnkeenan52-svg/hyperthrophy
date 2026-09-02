@@ -551,6 +551,17 @@ body {
 }
 .cpay-clock.out { color: var(--bad); }
 
+/* Quiet, but never absent: it is the only way off this screen, so it keeps a
+   full 44px box and does not hide behind a hover. */
+.cpay-cancel {
+  align-self: center; margin-top: 2px; min-height: 44px; padding: 0 10px;
+  background: none; border: none; cursor: pointer;
+  color: var(--dim); font: 650 13.5px var(--font-body, inherit);
+  text-decoration: underline; text-underline-offset: 3px;
+}
+.cpay-cancel:hover { color: var(--ink); }
+.cpay-cancel-note { margin: -6px 0 0; text-align: center; font-size: 12px; color: var(--dim); }
+
 /* ── pay panel (XOE pattern) ──────────────────────────────────────────────── */
 .pay-panel { display: flex; flex-direction: column; gap: 12px; }
 .pay-head { display: flex; align-items: center; gap: 10px; }
@@ -2824,6 +2835,22 @@ html.menu-open, html.menu-open body { overflow: hidden; }
 .ck-sub { font-size: 12px; font-weight: 600; color: var(--dim); letter-spacing: 0; margin-left: 4px; }
 .admin-store-link { color: inherit; font-weight: 650; text-decoration: none; }
 .admin-store-link:hover { text-decoration: underline; }
+/* The second destination in the same cell: the seller's public storefront, in
+   a new tab. It sits on its own line under the name — an action, not more of
+   the row's data — so it carries the accent and the external-link mark, and it
+   is sized for a thumb: this table is read on a phone, where the row becomes a
+   card and this is one of the two things on it worth pressing. Its line never
+   outruns the name above it, so the column does not grow. */
+.admin-live-link {
+  display: flex; align-items: center; gap: 6px;
+  width: fit-content; min-height: 30px; margin-top: 2px;
+  font-size: 0.86em; font-weight: 600;
+  color: var(--accent); text-decoration: none;
+}
+.admin-live-link:hover { text-decoration: underline; }
+.admin-live-link svg { flex: none; }
+.admin-live-none { display: block; margin-top: 2px; font-size: 0.86em; font-weight: 400; }
+@media (max-width: 760px) { .admin-live-link { min-height: 44px; } }
 /* picker: the owner's door into the admin page */
 .admin-link {
   display: flex; align-items: center; gap: 12px; padding: 13px 16px; text-decoration: none;
@@ -2859,10 +2886,16 @@ html.menu-open, html.menu-open body { overflow: hidden; }
   display: flex; align-items: center; justify-content: center;
   transition: border-color 0.15s var(--ease-out), transform 0.15s var(--ease-out);
 }
-.th-tile:hover .th-tile-thumb { border-color: #454545; transform: translateY(-1px); }
+/* Tokens, not the old monochrome literals. #fff was the SELECTED ring: on the
+   dashboard's light face that is a white ring on a white card, so the seller
+   could not see which store theme was chosen — the only thing left saying so
+   was the tick beside the name. The night faces were fine because
+   dashboard.html re-stated all three in navy; the light face inherited a rule
+   written for a black product and nobody looked. */
+.th-tile:hover .th-tile-thumb { border-color: var(--edge-hot); transform: translateY(-1px); }
 .th-tile:focus-visible { outline: none; }
-.th-tile:focus-visible .th-tile-thumb { outline: 2px solid #fff; outline-offset: 2px; }
-.th-tile.active .th-tile-thumb { border-color: #fff; }
+.th-tile:focus-visible .th-tile-thumb { outline: 2px solid var(--accent); outline-offset: 2px; }
+.th-tile.active .th-tile-thumb { border-color: var(--edge-selected); }
 .th-tile-card { width: 74%; padding: 7px 8px; display: flex; flex-direction: column; gap: 4px; }
 .th-tile-line { height: 3px; border-radius: 2px; width: 78%; }
 .th-tile-line2 { width: 48%; opacity: 0.45; }
@@ -2918,18 +2951,24 @@ html.menu-open, html.menu-open body { overflow: hidden; }
 /* the tap-to-load stand-in for the preview frame on a narrow screen */
 .th-preview-open { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: auto; min-height: 44px; white-space: nowrap; }
 .th-stage-empty { border: 1px dashed var(--edge); border-radius: 12px; padding: 40px 20px; text-align: center; }
-.th-frame { border: 1px solid var(--edge); border-radius: 12px; overflow: hidden; background: #0c0c0c; display: flex; flex-direction: column; }
-.th-frame-bar { display: flex; align-items: center; gap: 6px; padding: 9px 12px; background: #141414; border-bottom: 1px solid var(--edge); }
-.th-frame-dot { width: 9px; height: 9px; border-radius: 50%; background: #2e2e2e; }
+/* The browser-window mock around the live preview. Every surface here was a
+   literal near-black — #0c0c0c, #141414, #2e2e2e, #0d0d0d — from the days the
+   product had exactly one face, and on the light dashboard it was a black hole
+   punched into a white card with a dark-on-black "Load live preview" button
+   sitting in the middle of it. It is dashboard chrome, so it wears the
+   dashboard's face: window ground below the bar, a lifted bar above it. */
+.th-frame { border: 1px solid var(--edge); border-radius: 12px; overflow: hidden; background: var(--well); display: flex; flex-direction: column; }
+.th-frame-bar { display: flex; align-items: center; gap: 6px; padding: 9px 12px; background: var(--raised); border-bottom: 1px solid var(--edge); }
+.th-frame-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--edge-hot); }
 .th-frame-url {
   margin-left: 10px; flex: 1; text-align: center; font-size: 11.5px; color: var(--dim);
-  background: #0d0d0d; border: 1px solid #1f1f1f; border-radius: 6px; padding: 4px 12px;
+  background: var(--well); border: 1px solid var(--hairline-2); border-radius: 6px; padding: 4px 12px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 /* the page renders at a real device viewport and is scaled to fit the frame */
-.th-viewport { position: relative; overflow: hidden; height: 560px; background: #0c0c0c; }
-.th-preview { position: absolute; top: 0; left: 0; border: 0; background: #0c0c0c; transform-origin: 0 0; }
-.th-viewport.phone .th-preview { border-left: 1px solid #1c1c1c; border-right: 1px solid #1c1c1c; }
+.th-viewport { position: relative; overflow: hidden; height: 560px; background: var(--well); }
+.th-preview { position: absolute; top: 0; left: 0; border: 0; background: var(--well); transform-origin: 0 0; }
+.th-viewport.phone .th-preview { border-left: 1px solid var(--hairline-2); border-right: 1px solid var(--hairline-2); }
 .th-device { display: flex; gap: 2px; margin-left: 8px; border: 1px solid var(--hairline-2); border-radius: 6px; background: var(--well); padding: 2px; }
 .th-dev-btn {
   display: grid; place-items: center; width: 27px; height: 22px; border: 0; border-radius: 4px;
@@ -3719,7 +3758,13 @@ html[data-theme='light'] body.home .browser-frame .hero-video { background: #faf
    page that looks like a checkout must not be able to accept a card number
    even by accident, so it is built so that it cannot. The card shown is
    4242 4242 4242 4242, Stripe's published test number, and the panel carries a
-   Demo badge for the whole run. */
+   Demo badge and a Demo strip for the whole run.
+
+   THE FIDELITY IS COMPOSITION, NOT COSTUME. Order summary left, payment right;
+   email, card group, cardholder name, country + postal, in that order; Pay or
+   Subscribe on the button; a "Powered by Stripe" trust line, set in OUR type.
+   No Stripe logo, wordmark, palette or type is reproduced — the panel wears
+   the SELLER's theme, because that is what their buyers see. */
 .dcx-back {
   position: fixed; inset: 0; z-index: 90;
   background: rgba(6, 6, 8, 0.72);
@@ -3734,49 +3779,122 @@ html[data-theme='light'] body.home .browser-frame .hero-video { background: #faf
   display: grid; grid-template-columns: 1fr 1fr;
   transform: translateY(10px) scale(0.985);
   transition: transform 260ms var(--ease-out, ease);
+  /* The summary tint and the field wells are mixed from the STORE's own two
+     colours, so the replica wears the seller's theme instead of the
+     platform's slate — those tokens are not part of what a theme sets. */
+  --dcx-tint: color-mix(in srgb, var(--panel) 95%, var(--ink));
+  --dcx-well: color-mix(in srgb, var(--panel) 93%, var(--ink));
 }
 .dcx-back.in .dcx { transform: none; }
 @media (max-width: 760px) { .dcx { grid-template-columns: 1fr; } }
 
+/* Said once, across the whole panel, ABOVE anything that looks like a form —
+   the Demo pill alone leaves the sentence to be inferred from a badge. */
+.dcx-strip {
+  grid-column: 1 / -1; margin: 0; padding: 11px 20px;
+  /* Sticky, and opaque enough to be: on a phone the panel scrolls, and the
+     sentence has to still be there at the end of the run. */
+  position: sticky; top: 0; z-index: 2;
+  border-bottom: 1px solid var(--edge); background: color-mix(in srgb, var(--panel) 86%, #5865f2);
+  font-size: 12.5px; line-height: 1.5; text-align: center;
+}
+.dcx-strip b { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; }
+
 .dcx-side {
-  padding: 30px 32px; border-right: 1px solid var(--hairline-2);
+  padding: 30px 32px; border-right: 1px solid var(--edge); background: var(--dcx-tint);
   position: relative;                 /* the close button anchors to THIS, not the viewport */
   display: flex; flex-direction: column;
 }
-@media (max-width: 760px) { .dcx-side { border-right: 0; border-bottom: 1px solid var(--hairline-2); } }
+@media (max-width: 760px) { .dcx-side { border-right: 0; border-bottom: 1px solid var(--edge); padding: 24px 20px; } }
 .dcx-brand { display: flex; align-items: center; gap: 11px; font-weight: 700; font-size: 15px; }
 .dcx-brand img { width: 30px; height: 30px; border-radius: 8px; display: block; }
-.dcx-lead { margin-top: 26px; color: var(--dim); font-size: 14px; }
-.dcx-amt { font-family: var(--font-head); font-weight: 700; font-size: 38px; margin-top: 4px; letter-spacing: -0.02em; }
-.dcx-rule { height: 1px; background: var(--hairline-2); margin: 24px 0; }
+.dcx-lead { margin-top: 24px; color: var(--dim); font-size: 14px; }
+.dcx-amt {
+  font-family: var(--font-head); font-weight: 700; font-size: 38px; margin-top: 4px;
+  letter-spacing: -0.02em; display: flex; align-items: baseline; gap: 9px;
+}
+.dcx-per { font-size: 14px; font-weight: 600; letter-spacing: 0; color: var(--dim); }
+.dcx-rule { height: 1px; background: var(--edge); margin: 22px 0; }
 .dcx-line { display: flex; justify-content: space-between; gap: 16px; font-size: 14.5px; }
 .dcx-line b { font-weight: 600; }
-.dcx-line + .dcx-note { color: var(--dim); font-size: 13px; margin-top: 5px; }
 .dcx-line.sum { color: var(--dim); font-size: 14px; margin-top: 12px; }
 .dcx-line.due { font-weight: 700; margin-top: 12px; }
 
+/* Beside the form on a laptop, folded into a one-line disclosure on a phone —
+   the same shape the hosted page takes, so the card fields are the first
+   thing under the amount instead of the last thing under a wall of totals. */
+.dcx-sum { margin-top: 2px; }
+.dcx-sumbar {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  margin-top: 16px; padding: 11px 13px; border: 1px solid var(--edge); border-radius: 8px;
+  font-size: 13.5px; color: var(--dim); cursor: pointer; list-style: none;
+}
+.dcx-sumbar::-webkit-details-marker { display: none; }
+.dcx-sumamt { display: inline-flex; align-items: center; gap: 7px; color: var(--ink); font-weight: 700; }
+.dcx-sumamt svg { transition: transform 180ms ease; }
+.dcx-sum[open] .dcx-sumamt svg { transform: rotate(180deg); }
+@media (min-width: 761px) { .dcx-sumbar { display: none; } }
+
+.dcx-item { display: flex; align-items: flex-start; gap: 12px; }
+.dcx-thumb {
+  width: 40px; height: 40px; flex: none; border-radius: 6px; object-fit: cover;
+  background: var(--dcx-well); border: 1px solid var(--edge);
+  display: grid; place-items: center; font-weight: 700; font-size: 15px; color: var(--dim);
+}
+.dcx-item-name { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; font-size: 14.5px; }
+.dcx-item-name b { font-weight: 600; }
+.dcx-item-name small { color: var(--dim); font-size: 13px; line-height: 1.45; }
+.dcx-item-amt { font-size: 14.5px; white-space: nowrap; text-align: right; }
+.dcx-item-amt small { display: block; color: var(--dim); font-size: 12.5px; }
+
+/* The trust line the hosted page really carries: our own type, no borrowed
+   mark. Bottom of the summary on a laptop, under the button on a phone. */
+.dcx-legal { margin: 0; color: var(--dim); font-size: 12px; display: flex; align-items: center; gap: 9px; }
+.dcx-legal.wide { margin-top: auto; padding-top: 26px; }
+.dcx-legal.narrow { margin-top: 16px; justify-content: center; }
+.dcx-sep { opacity: 0.55; }
+@media (min-width: 761px) { .dcx-legal.narrow { display: none; } }
+@media (max-width: 760px) { .dcx-legal.wide { display: none; } }
+
 .dcx-pay { padding: 30px 32px; position: relative; }
+@media (max-width: 760px) {
+  .dcx-pay { padding: 24px 20px; }
+  /* On a phone the panel scrolls under the sticky strip; an absolutely placed
+     badge would sit half-tucked behind it. In flow it scrolls away cleanly,
+     and the strip is the thing that stays. */
+  .dcx-badge { position: static; display: block; width: max-content; margin: 0 0 -4px auto; }
+}
 .dcx-badge {
   position: absolute; top: 22px; right: 26px;
   font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
   color: var(--blurple-text); background: rgba(88, 101, 242, 0.14);
   border: 1px solid rgba(88, 101, 242, 0.35); border-radius: 999px; padding: 4px 10px;
 }
-.dcx-lab { font-size: 13px; color: var(--dim); margin: 18px 0 7px; }
+.dcx-lab { font-size: 13px; color: var(--dim); margin: 18px 0 7px; transition: opacity 200ms ease; }
 .dcx-lab:first-of-type { margin-top: 0; }
 /* A field, and deliberately not a field: a div with a caret drawn on it. */
 .dcx-f {
-  height: 44px; border: 1px solid var(--edge); border-radius: 8px; background: var(--well);
+  height: 44px; border: 1px solid var(--edge); border-radius: 8px; background: var(--dcx-well);
   display: flex; align-items: center; padding: 0 13px; font-size: 15px; gap: 9px;
-  transition: border-color 160ms ease;
+  transition: border-color 160ms ease, opacity 200ms ease;
 }
-.dcx-f.on { border-color: var(--edge-hot); }
+.dcx-f.on { border-color: var(--edge-selected, var(--edge-hot)); }
 .dcx-f .t { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; }
 .dcx-f .caret { width: 1.5px; height: 18px; background: var(--ink); opacity: 0; }
 .dcx-f.on .caret { opacity: 1; animation: dcx-blink 1.06s steps(1, end) infinite; }
 @keyframes dcx-blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
-.dcx-card { display: grid; grid-template-columns: 1fr; gap: 8px; }
-.dcx-card .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+/* Number + expiry + CVC are ONE bordered group divided by hairlines, and so
+   are country + postal code, exactly as the hosted page draws them. */
+.dcx-group {
+  border: 1px solid var(--edge); border-radius: 8px; overflow: hidden;
+  transition: border-color 160ms ease, opacity 200ms ease;
+}
+.dcx-group:has(.dcx-f.on) { border-color: var(--edge-selected, var(--edge-hot)); }
+.dcx-group .dcx-f { border: 0; border-radius: 0; }
+.dcx-group .dcx-f + .dcx-f, .dcx-group .pair { border-top: 1px solid var(--edge); }
+.dcx-group .pair { display: grid; grid-template-columns: 1fr 1fr; }
+.dcx-group .pair .dcx-f + .dcx-f { border-top: 0; border-left: 1px solid var(--edge); }
+.dcx-cvc, .dcx-f > svg { color: var(--dim); flex: none; }
 .dcx-brandmark {
   width: 34px; height: 22px; border-radius: 4px; background: #1434CB; color: #fff;
   font-size: 10px; font-weight: 700; letter-spacing: 0.06em;
@@ -3784,6 +3902,9 @@ html[data-theme='light'] body.home .browser-frame .hero-video { background: #faf
   opacity: 0; transform: scale(0.7); transition: opacity 200ms ease, transform 200ms var(--ease-out, ease);
 }
 .dcx-brandmark.in { opacity: 1; transform: none; }
+/* While the charge is in flight the form goes quiet and the button keeps only
+   its spinner — the hosted page's thinking state. */
+.dcx-pay.thinking .dcx-lab, .dcx-pay.thinking .dcx-f, .dcx-pay.thinking .dcx-group { opacity: 0.5; }
 
 .dcx-btn {
   width: 100%; height: 46px; margin-top: 22px; border: 0; border-radius: 8px;
@@ -3799,34 +3920,31 @@ html[data-theme='light'] body.home .browser-frame .hero-video { background: #faf
   animation: dcx-spin 620ms linear infinite;
 }
 @keyframes dcx-spin { to { transform: rotate(360deg); } }
-
-.dcx-foot {
-  display: flex; align-items: center; justify-content: center; gap: 8px;
-  margin-top: 16px; font-size: 12.5px; color: var(--dim);
-}
-.dcx-foot svg { flex: none; }
+.dcx-terms { margin: 12px 0 0; color: var(--dim); font-size: 11.5px; line-height: 1.55; }
 
 .dcx-grant {
   margin-top: 16px; border: 1px solid rgba(88, 101, 242, 0.32);
   background: rgba(88, 101, 242, 0.09); border-radius: 10px; padding: 13px 15px;
-  font-size: 14px; display: flex; align-items: center; gap: 10px;
+  font-size: 14px;
   opacity: 0; transform: translateY(6px);
   transition: opacity 240ms ease, transform 240ms var(--ease-out, ease);
 }
 .dcx-grant.in { opacity: 1; transform: none; }
+.dcx-grant-top { margin: 0; display: flex; align-items: center; gap: 10px; }
+.dcx-grant-note { margin: 8px 0 0; color: var(--dim); font-size: 12.5px; line-height: 1.55; }
 .dcx-grant .pill {
   font-weight: 700; color: var(--blurple-text); background: rgba(88, 101, 242, 0.16);
   border-radius: 6px; padding: 2px 8px;
 }
-.dcx-out { margin-top: 18px; display: flex; gap: 10px; opacity: 0; transition: opacity 240ms ease; }
+.dcx-out { margin-top: 18px; display: flex; flex-wrap: wrap; gap: 10px; opacity: 0; transition: opacity 240ms ease; }
 .dcx-out.in { opacity: 1; }
 .dcx-out a, .dcx-out button {
-  flex: 1; height: 42px; border-radius: 8px; display: flex; align-items: center;
-  justify-content: center; font-weight: 700; font-size: 14px; text-decoration: none;
+  flex: 1 1 auto; height: 42px; padding: 0 14px; border-radius: 8px; display: flex;
+  align-items: center; justify-content: center; white-space: nowrap;
+  font-weight: 700; font-size: 14px; text-decoration: none;
   border: 1px solid var(--edge); color: var(--ink); background: transparent;
 }
 .dcx-out a.primary { background: var(--solid); color: var(--solid-ink); border-color: var(--solid); }
-.dcx-side .dcx-trust { margin-top: auto; padding-top: 26px; color: var(--dim); font-size: 12.5px; line-height: 1.6; }
 .dcx-x {
   position: absolute; top: 14px; left: 14px; width: 32px; height: 32px; border-radius: 8px;
   border: 0; background: transparent; color: var(--dim); font-size: 19px; line-height: 1;
@@ -3835,7 +3953,7 @@ html[data-theme='light'] body.home .browser-frame .hero-video { background: #faf
 .dcx-x:hover { background: var(--panel-hover); color: var(--ink); }
 
 @media (prefers-reduced-motion: reduce) {
-  .dcx-back, .dcx, .dcx-grant, .dcx-out, .dcx-brandmark { transition: none; }
+  .dcx-back, .dcx, .dcx-grant, .dcx-out, .dcx-brandmark, .dcx-sumamt svg { transition: none; }
   .dcx-f.on .caret, .dcx-spin { animation: none; }
 }
 
@@ -4261,7 +4379,7 @@ input, select, textarea {
   outline: none;
   box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px color-mix(in srgb, var(--accent) 55%, transparent);
 }
-.shop-tab:focus-visible, .shop-back:focus-visible, .shop-desc-more:focus-visible {
+.shop-tab:focus-visible, .shop-back:focus-visible, .shop-desc-more:focus-visible, .cpay-cancel:focus-visible {
   outline: none;
   border-radius: 8px;
   box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px color-mix(in srgb, var(--accent) 55%, transparent);

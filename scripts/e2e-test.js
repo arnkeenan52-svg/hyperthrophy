@@ -614,11 +614,16 @@ async function nowpaymentsHandler(req, res) {
     return;
   }
   if (url.pathname === '/merchant/coins' && req.method === 'GET') {
+    // The key is `currencies`. That is the one NOWPayments documents for this
+    // endpoint and the only one in their sample response; `selectedCurrencies`
+    // appears nowhere in their material, so a mock that answers with it alone
+    // proves the rail against a shape the provider does not send.
+    //
     // Deliberately UPPERCASE: tickers are compared lowercase everywhere, and
     // the provider is not consistent about which it sends. XMR is enabled for
     // DEPOSITS only — see validate-address below — which is the case the
     // payout gate must not confuse with "available for payouts".
-    json(res, 200, { selectedCurrencies: nowpayments.noCoins ? [] : ['BTC', 'SOL', 'USDTSOL', 'ETH', 'XMR'] });
+    json(res, 200, { currencies: nowpayments.noCoins ? [] : ['BTC', 'SOL', 'USDTSOL', 'ETH', 'XMR'] });
     return;
   }
   if (url.pathname === '/payout/validate-address' && req.method === 'POST') {
@@ -643,8 +648,25 @@ async function nowpaymentsHandler(req, res) {
     return;
   }
   if (url.pathname === '/min-amount' && req.method === 'GET') {
-    nowpayments.minAmount.push({ from: url.searchParams.get('currency_from'), to: url.searchParams.get('currency_to') });
-    json(res, 200, { min_amount: 0.004, currency_from: url.searchParams.get('currency_from') });
+    nowpayments.minAmount.push({
+      from: url.searchParams.get('currency_from'),
+      to: url.searchParams.get('currency_to'),
+      // The flow the floor is asked about. NOWPayments: these "allow you to
+      // see current minimum amounts for corresponsing flows (it may differ
+      // from the standard flow!)" — so a quote taken without them is a
+      // different number from the one the payment we create is judged by.
+      fixedRate: url.searchParams.get('is_fixed_rate'),
+      feePaidByUser: url.searchParams.get('is_fee_paid_by_user'),
+      fiat: url.searchParams.get('fiat_equivalent'),
+    });
+    // fiat_equivalent is returned only when it was asked for — the provider
+    // documents it as "(Optional) Get the fiat equivalent", not as a field
+    // every answer carries.
+    json(res, 200, {
+      min_amount: 0.004,
+      currency_from: url.searchParams.get('currency_from'),
+      ...(url.searchParams.get('fiat_equivalent') ? { fiat_equivalent: 12.5 } : {}),
+    });
     return;
   }
   if (url.pathname === '/payment' && req.method === 'POST') {
@@ -656,6 +678,12 @@ async function nowpaymentsHandler(req, res) {
     if (nowpayments.delayCreateMs) await sleep(nowpayments.delayCreateMs);
     nowpayments.created.push(body);
     const id = `npid_${++nowpayments.n}`;
+    // Shaped like the provider's own payment object, not like the subset this
+    // app happens to read. Two of these fields are the reason the IPN
+    // signature has to re-serialise recursively: `fee` is a NESTED object
+    // whose keys do not arrive sorted, and `payment_extra_ids` is an ARRAY of
+    // child deposits. A mock that only ever produced flat scalars let a
+    // top-level-only sort pass every scenario.
     const payment = {
       payment_id: id,
       payment_status: 'waiting',
@@ -665,8 +693,20 @@ async function nowpaymentsHandler(req, res) {
       price_amount: body.price_amount,
       price_currency: body.price_currency,
       order_id: body.order_id,
+      order_description: body.order_description,
       actually_paid: 0,
+      // Present and zero on a payment the provider's own example shows as
+      // paid in full: the field says nothing until a deposit has been valued
+      // in fiat, which is exactly how settledFiat reads it.
+      actually_paid_at_fiat: 0,
       payin_extra_id: null,
+      purchase_id: `${5300000000 + nowpayments.n}`,
+      parent_payment_id: null,
+      invoice_id: null,
+      outcome_amount: 0.4985,
+      outcome_currency: body.payout_currency,
+      payment_extra_ids: null,
+      fee: { currency: body.pay_currency, depositFee: 0.09853637216235617, withdrawalFee: 0, serviceFee: 0 },
       expiration_estimate_date: new Date(Date.now() + 20 * 60_000).toISOString(),
     };
     nowpayments.payments.set(id, payment);
@@ -1181,6 +1221,55 @@ test('the look is free: every background and an imported URL, on every plan', as
     `every plan, Free included, advertises all ${total} backgrounds plus the import — got ${JSON.stringify(looks)}`);
 });
 
+test('How it works shows the mechanism: the steps are numbered and wear the real marks', () => {
+  // The band used to be three centred paragraphs under three grey discs. It
+  // TOLD the mechanism and showed none of it: a wallet glyph does not say
+  // "your own Stripe account", a basket does not say "a role is the product",
+  // and in a section headed "Three steps" the order — the one thing that makes
+  // it a sequence rather than a list — was nowhere on screen. Each of the four
+  // things that fixes it is pinned here, because every one is invisible to the
+  // HTTP scenarios and each has a cheap way of quietly regressing.
+  const index = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const css = index.slice(index.indexOf('<style>'), index.indexOf('</style>'));
+  const band = index.slice(index.indexOf('<div class="trio">'), index.indexOf('<div class="pay">'));
+  assert.ok(band.length > 400, 'the step band and the payment strip are both still there');
+
+  // 1 · the order is on screen, and it is in order.
+  assert.deepEqual([...band.matchAll(/<span class="trio-n"[^>]*>(\d+)<\/span>/g)].map((m) => m[1]),
+    ['01', '02', '03'], 'the three steps are numbered, in sequence');
+
+  // 2 · each step wears the real mark of the thing it names — the Stripe
+  //     wordmark, the blurple role chip a storefront actually renders, the
+  //     Discord glyph the role lands in — and they are white chips, the same
+  //     component the payment strip below is built from, which is what makes
+  //     that strip read as the end of step three rather than a fourth thing.
+  assert.match(band, /class="trio-badge trio-stripe"[^>]*>\s*<svg viewBox="54 36 360 150"/,
+    'step one wears the Stripe wordmark');
+  assert.match(band, /<span class="trio-badge trio-role"[^>]*>@VIP<\/span>/,
+    'step two wears a role chip');
+  assert.match(band, /class="trio-badge trio-discord"[^>]*>\s*<svg viewBox="0 0 127.14 96.36"/,
+    'step three wears the Discord mark');
+  assert.match(css, /^\.trio-badge\{[^}]*background:#fff/m, 'the step marks are the strip\'s white chip');
+
+  // 3 · the copy is the seller's, unchanged: this was a layout fix, and a
+  //     redesign that quietly rewrites a claim is not one.
+  assert.deepEqual([...band.matchAll(/<h3>([^<]+)<\/h3>/g)].map((m) => m[1]),
+    ['Set up payouts', 'Create a product', 'Get paid'], 'the three step headings');
+
+  // 4 · a step is a card on BOTH faces, and so is the strip that closes the
+  //     band. Small copy straight on the sky photograph is the contrast bug
+  //     this page has fixed everywhere else; and the strip used to be framed
+  //     on the night face only, so on day it read as a row of logos that had
+  //     drifted loose below the section.
+  assert.match(css, /^\.trio-item\{[^}]*background:var\(--glass\)/m, 'a step is a glass card');
+  assert.match(css, /^html:not\(\[data-theme="light"\]\) \.trio-item\{[^}]*background:rgba\(13,20,32,\.62\)/m,
+    'the night face gives the step card the same navy glass as the plan cards');
+  for (const face of ['html:not\\(\\[data-theme="light"\\]\\)', 'html\\[data-theme="light"\\]']) {
+    assert.match(css, new RegExp(`^${face} \\.pay\\{[^}]*border-radius:22px`, 'm'),
+      'both faces frame the payment strip');
+  }
+});
+
 test('landing polish holds: one gutter, centred community CTA, Cash App logotype, comments that match the code', () => {
   // Each of these was a real regression on the landing page and every one is
   // invisible to the HTTP-level scenarios, so they are pinned at the source.
@@ -1369,6 +1458,76 @@ test('the landing runs on one type scale, one vertical rhythm and one grid', () 
   }
 });
 
+test('the first screen earns its height: a capped well, a grounded claim field, a role band with a floor', () => {
+  // Measured on this machine at 1440x900 before the change: 256px of hero
+  // content adrift in a 752px well, so two thirds of the first screen was
+  // empty sky with a bouncing chevron as the only evidence the page continued.
+  // The claim field — the ONLY input above the fold and the only thing on that
+  // screen a visitor can act on — rode --glass, which is 6% white on the night
+  // face and 55% on the day face, so over a bright cloud it had no edge at all
+  // and read as chrome rather than an invitation. And the role marquee was two
+  // rows of solid pills on bare sky: on the day face the brightest object on
+  // the page, louder than the headline above it, with nothing marking where
+  // the first screen ended and the argument began.
+  //
+  // Every number below is a composition decision, so it is pinned here rather
+  // than left to the next person's eye.
+  const index = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const css = index.slice(index.indexOf('<style>'), index.indexOf('</style>'));
+
+  // 1 · THE WELL. Above the phone breakpoint the hero is capped, which lets the
+  // top of the role band sit inside the fold — a floor under the hero, and a
+  // better reason to scroll than a marker in an empty half ever was.
+  //
+  // There is no chevron rule to pin beside this one. The scroll hint was
+  // deleted with the empty sky it pointed into, element and all, and the
+  // homepage scenario asserts the string is gone from the page — so a rule
+  // switching it off would be a rule about nothing, and the two pins would
+  // contradict each other. The cap is the whole change here.
+  const wide = css.match(/@media \(min-width:601px\)\{([\s\S]*?)\n\}/);
+  assert.ok(wide, 'the desktop-and-up hero block is where it was written');
+  assert.match(wide[1], /\.hero\{min-height:clamp\(620px,86svh,820px\)/,
+    'the first screen is capped, so a tall window shows more page rather than more sky');
+  // the phone keeps the full-screen hero the footer reveal is built on
+  assert.match(css, /\.hero\{min-height:100vh;min-height:100lvh\}/,
+    'the phone hero still owns the whole screen — the blind depends on it');
+
+  // 2 · THE CLAIM FIELD. A ground of its own on BOTH faces, an address set in
+  // ink rather than in the placeholder grey, and a submit that inverts the
+  // field it sits in — at a thumb's size on a phone, where it is the only
+  // action on the screen and was 34px tall.
+  assert.match(css, /html:not\(\[data-theme="light"\]\) \.capture\{background:rgba\(13,20,32,\.68\)/,
+    'the night field has a ground of its own, not 6% white over the clouds');
+  assert.match(css, /html\[data-theme="light"\] \.capture\{background:rgba\(255,255,255,\.74\)/,
+    'the day field has a ground of its own');
+  assert.match(css, /\.capture-prefix\{font-size:17px;font-weight:600;color:var\(--ink\)/,
+    'dues.gg\/ is set in ink, so the field reads as an address being handed over');
+  assert.match(css, /html:not\(\[data-theme="light"\]\) \.btn-capture\{background:#f4f7fd/,
+    'the night submit inverts the field rather than sitting two steps off it');
+  assert.match(css, /\.btn-capture\{\n  display:inline-flex[^}]*min-height:44px/,
+    'the submit is 44px');
+  assert.match(css, /@media \(max-width:600px\)\{[\s\S]*?\.btn-capture\{min-height:44px/,
+    'and stays 44px under a thumb');
+
+  // 3 · THE CLOSING EVIDENCE. What the rail is, is a different claim from what
+  // it costs; middot-chained onto the end of the free-tier note it read as the
+  // tail of the fine print.
+  assert.match(css, /\.mc-compat\{display:block/, 'Compatible with … is its own line');
+  assert.doesNotMatch(index, /<span class="mc-compat"> &#183;/,
+    'and is no longer chained onto the free-tier note by a middot');
+
+  // 4 · THE ROLE BAND. A ground with a hairline top and bottom on both faces,
+  // and chips that stopped shouting: no solid card colour, no drop shadow.
+  assert.match(css, /html:not\(\[data-theme="light"\]\) \.rolemarq\{background:rgba\(13,20,32,\.42\);border-block:1px solid/,
+    'the night role band stands on a ground, not on bare sky');
+  assert.match(css, /html\[data-theme="light"\] \.rolemarq\{background:rgba\(255,255,255,\.44\);border-block:1px solid/,
+    'the day role band stands on a ground');
+  const pill = css.match(/\n\.pill\{([^}]*)\}/);
+  assert.ok(pill, '.pill still has a rule');
+  assert.doesNotMatch(pill[1], /var\(--cream\)/, 'the chips are no longer a solid card colour');
+  assert.doesNotMatch(pill[1], /box-shadow/, 'and carry no drop shadow floating on the sky');
+});
+
 test('one nav: every page in the site shows the same header links, in the same order', () => {
   // The site grew three different desktop navs. The landing and /pricing had
   // Pricing / Discover / Invite Dues; the SEO and legal pages had
@@ -1473,41 +1632,81 @@ test('dashboard: MRR is a monthly rate, a flat product reads flat, and the black
   // fine, reading the wrong store's face is not.
   const headSrc = html.match(/<script>(try \{[^<]*dues-dash-face[^<]*)<\/script>/)?.[1];
   assert.ok(headSrc, 'dashboard.html still stamps the face before first paint');
-  const firstPaint = (saved, hash) => {
-    const root = { dataset: {} };
+  // THREE faces now, not two: the head script owns light as well, because the
+  // face is one setting and light is one of its values. It has to CLEAR as
+  // well as set — theme.js runs above it and stamps data-theme='light' from a
+  // session carried in off the marketing pages, and the store's own saved
+  // face must win over that or the picker says navy on a white screen.
+  const firstPaint = (saved, hash, sessionLight = false) => {
+    const root = { dataset: sessionLight ? { theme: 'light' } : {} };
     new Function('localStorage', 'location', 'document', headSrc)(
       { getItem: (k) => (k in saved ? saved[k] : null) },
       { hash },
       { documentElement: root },
     );
-    return root.dataset.dark ?? 'navy';
+    return root.dataset.theme === 'light' ? 'light' : (root.dataset.dark ?? 'navy');
   };
-  // Two stores, two faces, and the bare key left on whichever was opened last.
-  const twoStores = { [key]: 'black', [`${key}:ink`]: 'black', [`${key}:sky`]: 'navy' };
+  // Three stores, three faces, and the bare key left on whichever was opened last.
+  const twoStores = { [key]: 'black', [`${key}:ink`]: 'black', [`${key}:sky`]: 'navy', [`${key}:day`]: 'light' };
   assert.equal(firstPaint(twoStores, '#/store/sky'), 'navy', 'the navy store paints navy even when the black one was opened last');
   assert.equal(firstPaint(twoStores, '#/store/ink'), 'black', 'and the black store still paints black');
+  assert.equal(firstPaint(twoStores, '#/store/day'), 'light', 'and the light store paints light, before the API answers');
   // A store never opened here, and the store-less views, fall back to the
   // last saved face — the behaviour the single key always had.
   assert.equal(firstPaint(twoStores, '#/store/brand-new'), 'black', 'an unseen store falls back to the last saved face');
   assert.equal(firstPaint(twoStores, '#/'), 'black', 'so does the picker');
   assert.equal(firstPaint({ [`${key}:sky`]: 'navy' }, '#/'), 'navy', 'and nothing saved is navy, never a crash');
+  // The clearing half. Without it a light session from the marketing site
+  // leaves the dashboard white while its picker and its saved face say navy.
+  assert.equal(firstPaint(twoStores, '#/store/sky', true), 'navy', "a light session does not beat the store's saved navy");
+  assert.equal(firstPaint(twoStores, '#/store/ink', true), 'black', 'nor its saved black');
+  assert.equal(firstPaint({}, '#/store/sky', true), 'navy', 'and nothing saved means navy, the dashboard default');
+  assert.equal(firstPaint(twoStores, '#/store/day', true), 'light', 'a saved light face still paints light');
   // dashboard.js must WRITE the per-store key, or the head script reads a key
   // that is never set and the fallback quietly becomes the only path.
-  assert.match(dash, /rememberDarkFace\(darkFace, store\.slug\)/, 'viewStore remembers the face under the store it belongs to');
-  assert.match(dash, /localStorage\.setItem\(darkFaceKey\(slug\), face\)/, 'rememberDarkFace writes the per-store key');
+  assert.match(dash, /rememberFace\(face, store\.slug, prefsDarkHalf\(dashPrefs\)\)/, 'viewStore remembers the face under the store it belongs to');
+  assert.match(dash, /localStorage\.setItem\(darkFaceKey\(slug\), face\)/, 'rememberFace writes the per-store key');
   const routeSrc = dash.match(/async function route\(\) \{[\s\S]*?\n\}/)[0];
   const at = (needle) => { const i = routeSrc.indexOf(needle); assert.ok(i >= 0, `route() must contain ${needle}`); return i; };
-  assert.ok(at('applyDarkFace(savedDarkFace())') < at('viewSetup(') && at('applyDarkFace(savedDarkFace())') < at('viewAdmin()') && at('applyDarkFace(savedDarkFace())') < at('viewPicker()'),
+  assert.ok(at('applyFace(savedFace())') < at('viewSetup(') && at('applyFace(savedFace())') < at('viewAdmin()') && at('applyFace(savedFace())') < at('viewPicker()'),
     'the saved face is applied before every store-less view');
-  assert.ok(!/const pickedFace[\s\S]*?rememberDarkFace/.test(dash.match(/function wireCustomize[\s\S]*?\n\}/)?.[0] ?? ''),
+  assert.ok(!/const pickedFace[\s\S]*?rememberFace/.test(dash.match(/function wireCustomize[\s\S]*?\n\}/)?.[0] ?? ''),
     'a preview is never remembered as the saved face');
-  // And the night rules that the black face inherits name tokens, not navy:
-  // the revenue tooltip and the preview's browser bar were the four that did.
-  for (const sel of ['.chart-tip', '.th-frame-bar', '.th-frame-url']) {
+  // ONE setting, three values, one control. The picker offers all three faces
+  // — the old shape was a two-way "dark style" row that, on the light face,
+  // looked live and changed nothing anyone could see.
+  const dcRow = dash.match(/<div class="dc-row"><span class="dc-lab">Theme<\/span>[\s\S]*?<\/div>/)?.[0] ?? '';
+  for (const f of ['light', 'navy', 'black']) assert.ok(dcRow.includes(`'${f}'`), `the dashboard theme picker offers ${f}`);
+  assert.ok(!/dc-lab">Dark style/.test(dash), 'and there is no second, invisible "dark style" control left over');
+  // The header button belongs to the dashboard, not to theme.js. If both bind
+  // it, one click toggles data-theme twice and lands back where it started.
+  assert.ok(!/data-theme-toggle/.test(html), 'dashboard.html does not hand its button to theme.js');
+  assert.match(html, /<button class="theme-btn" data-face-toggle/, 'the dashboard owns the header face button');
+  assert.match(dash, /document\.querySelectorAll\('\[data-face-toggle\]'\)\.forEach/, 'dashboard.js binds it');
+  // …and it SAVES. A shortcut that forgets on reload is the original
+  // complaint in a different place.
+  const pickSrc = dash.match(/async function pickFace\(face\) \{[\s\S]*?\n\}/)?.[0] ?? '';
+  assert.match(pickSrc, /rememberFace\(face, slug, half\)/, 'the header button mirrors the face for the next first paint');
+  assert.match(pickSrc, /api\('\/api\/admin\/store', \{ store: slug, dashboardPrefs: prefs \}\)/, 'and persists it on the store');
+  // And the night rule the black face inherits names tokens, not navy: the
+  // revenue tooltip was the one that did.
+  for (const sel of ['.chart-tip']) {
     const rule = html.match(new RegExp(`html:not\\(\\[data-theme='light'\\]\\) ${sel.replace('.', '\\.')} \\{([^}]*)\\}`))?.[1] ?? '';
     assert.ok(rule && !/#131b2d|#101827|19, 27, 45|16, 24, 39/.test(rule), `${sel} night rule must not hard-code navy: ${rule}`);
   }
-  assert.match(html, /html\[data-dark='black'\]:not\(\[data-theme='light'\]\) \.th-frame-dot/, 'the preview dots get a black-face value');
+  // The other direction, and the one that shipped: a rule written for the
+  // black product and inherited by the light face. The store-theme tiles'
+  // SELECTED ring was #fff — a white ring on a white card, so the light
+  // dashboard showed no selection at all — and the live preview's window mock
+  // was #0c0c0c, a black hole punched into a white panel. Both were only ever
+  // right because dashboard.html re-stated them for the night faces. No rule
+  // in either family may name a literal colour again.
+  const css = fs.readFileSync(new URL('../public/styles.css', import.meta.url), 'utf8');
+  const themeRules = [...css.matchAll(/(^|\})\s*(\.(?:th-tile|th-frame|th-viewport|th-preview)[^{}]*)\{([^}]*)\}/gm)];
+  assert.ok(themeRules.length >= 8, `expected the theme-picker rules to still be there, found ${themeRules.length}`);
+  for (const [, , sel, body] of themeRules) {
+    assert.ok(!/#[0-9a-fA-F]{3,8}\b/.test(body), `a theme-picker rule must name tokens, not a literal face: ${sel.trim()} {${body}}`);
+  }
 
   // Saving the storefront or dashboard appearance re-renders to a screen that
   // looks exactly like the one before the click; each says it landed.
@@ -1518,6 +1717,79 @@ test('dashboard: MRR is a monthly rate, a flat product reads flat, and the black
   // "2 months free" note at the card edge.
   const dcss = fs.readFileSync(new URL('../public/dash.css', import.meta.url), 'utf8');
   assert.match(dcss, /#billing-body \.bill-toggle \{[^}]*flex-wrap: wrap/, 'the billing interval toggle wraps on narrow phones');
+});
+
+test('every dashboard table row survives a 320px phone as a labelled card', async () => {
+  // The owner opened the live dashboard on a phone and found the Products
+  // price painted on top of "+ Option", "Link", the toggle and "Edit", with
+  // the product name gone entirely; Transactions ran the product name under
+  // the amount; the platform Stores table stacked owner, status, plan, id and
+  // date into one line. The cause was a desktop table shrunk rather than
+  // rebuilt: five nowrap columns cannot share 320px, so they overlapped.
+  //
+  // Below 760px a <tr> is now a card and each <td> a labelled line, and the
+  // label is the cell's data-th. That makes data-th load-bearing markup, not
+  // decoration: a cell without one renders a value with nothing saying what it
+  // is. Both halves of the contract are pinned here — the cells carry the
+  // attribute, and the stylesheet is still the thing that prints it.
+  const dash = fs.readFileSync(new URL('../public/dashboard.js', import.meta.url), 'utf8');
+  const dcss = fs.readFileSync(new URL('../public/dash.css', import.meta.url), 'utf8');
+
+  const rows = dash.match(/<tr\b[^>]*>[\s\S]*?<\/tr>/g) ?? [];
+  assert.ok(rows.length >= 7, `expected the dashboard's row templates, found ${rows.length}`);
+  let labelled = 0;
+  for (const row of rows) {
+    const cells = row.match(/<td\b[^>]*>/g) ?? [];
+    for (const [i, cell] of cells.entries()) {
+      // The first cell is the card's title and needs no label; the actions
+      // cell is a row of buttons that name themselves; a colspan cell is an
+      // empty state ("No stores yet.") and is a whole sentence already.
+      if (i === 0 || /row-actions/.test(cell) || /colspan=/.test(cell)) continue;
+      assert.match(cell, /data-th="[^"]+"/,
+        `every cell after the first needs a phone label — this one has none: ${cell.replace(/\s+/g, ' ')}`);
+      labelled += 1;
+    }
+  }
+  assert.ok(labelled >= 25, `expected the whole dashboard's cells to be labelled, counted ${labelled}`);
+
+  // The label must be the column's own header, or the phone tells the seller
+  // one thing and the desktop another. Every <th> with words in it — first
+  // column excepted, since that cell is the card's title — has to appear as a
+  // data-th somewhere.
+  for (const table of dash.match(/<table class="data-table[^"]*">[\s\S]*?<\/thead>/g) ?? []) {
+    const heads = (table.match(/<th[^>]*>([^<]*)<\/th>/g) ?? [])
+      .map((h) => h.replace(/<[^>]*>/g, '').trim());
+    for (const label of heads.slice(1)) {
+      if (!label) continue;
+      assert.ok(dash.includes(`data-th="${label}"`),
+        `column "${label}" has no cell carrying data-th="${label}"`);
+    }
+  }
+
+  // The stylesheet half. Without these the attributes are inert and the table
+  // is a desktop table again, at 320px, colliding.
+  const phone = dcss.match(/@media \(max-width: 760px\) \{[\s\S]*?\n\}/g) ?? [];
+  const stack = phone.find((b) => /content: attr\(data-th\)/.test(b));
+  assert.ok(stack, 'dash.css must print data-th as the cell label below 760px');
+  assert.match(stack, /white-space: normal/, 'and release the nowrap that made the cells overlap');
+  assert.match(stack, /body\.app \.data-table thead \{ display: none; \}/, 'and retire the header row the labels replace');
+  assert.match(stack, /td\.row-actions \{[\s\S]*?flex-wrap: wrap/, 'and give the row actions a wrapped row of their own');
+
+  // The platform tables were the worst of it and they were reusing .t-pay,
+  // whose phone column priority hides columns 5 and 6 — which on those two
+  // tables are Members/Revenue and First/Last seen, not Date. Their own
+  // classes are what keeps that rule off them.
+  assert.match(dash, /<table class="data-table t-stores">/, 'the platform Stores table has its own class');
+  assert.match(dash, /<table class="data-table t-users">/, 'the platform Users table has its own class');
+
+  // Safe area: the shell pays back every inset it opted into by asking for a
+  // cover viewport, or the wordmark sits under the clock.
+  const dhtml = fs.readFileSync(new URL('../public/dashboard.html', import.meta.url), 'utf8');
+  assert.match(dhtml, /name="viewport"[^>]*viewport-fit=cover/, 'the dashboard opts into the full screen');
+  for (const edge of ['top', 'left', 'right', 'bottom']) {
+    assert.ok(dcss.includes(`env(safe-area-inset-${edge}, 0px)`),
+      `the ${edge} inset must be paid back, with a 0px fallback`);
+  }
 });
 
 test('the pricing page prints TIERS — every price, yearly price and cap, by name', async () => {
@@ -3721,6 +3993,37 @@ test('platform admin endpoint: owner-only bird\'s-eye of users, stores and total
   // ('Tradeleaks Pro'), so assert by guild rather than by slug.
   assert.ok(d.stores.some((st) => String(st.guildId) === '900000000000000001'), 'the built-in guild\'s store is listed too');
 
+  // Every listed store is reachable from the row, in BOTH senses: the name
+  // opens that seller's dashboard, and the line under it opens the storefront
+  // their buyers actually see. The second one is the only route from here into
+  // a seller's public page — the platform view prints slugs, and a slug you
+  // have to retype into the address bar is not a link. A draft store has no
+  // public page, so it says so rather than offering one.
+  {
+    const src = fs.readFileSync(new URL('../public/dashboard.js', import.meta.url), 'utf8');
+    const row = src.slice(src.indexOf('const storeRow = (st) =>'), src.indexOf('const userRow = (u) ='));
+    assert.match(row, /href="#\/store\/\$\{esc\(st\.slug\)\}"/, 'the name still opens the seller dashboard');
+    assert.match(row, /st\.status === 'live'/, 'only a live store is offered as a link');
+    assert.match(row, /\$\{location\.origin\}\/\$\{st\.slug\}/, 'and it points at the public storefront, not the dashboard');
+    assert.match(row, /target="_blank" rel="noopener noreferrer"/, 'opened in a new tab, without handing the opener over');
+    assert.match(row, /Not live yet/, 'a draft store says why there is nothing to open');
+    // It rides in the FIRST cell, not in a column of its own: the desktop
+    // table already fills its panel, and an eighth column made the whole
+    // thing scroll sideways — every row paying for this one.
+    const header = src.slice(src.indexOf('<th>Store</th>'), src.indexOf('</tr></thead><tbody>${d.stores'));
+    assert.equal(header.split('<th').length - 1, 7, 'the platform Stores table stays seven columns wide');
+    assert.ok(row.indexOf('admin-live-link') < row.indexOf('data-th="Owner"'),
+      "the live link sits inside the store's own cell");
+    // The phone card hides the owner's 19-digit Discord id, and that rule is
+    // written as a column position — so it has to name the column Owner is
+    // actually in, or it silently starts hiding some other cell.
+    const ownerCol = header.split('<th').findIndex((h) => h.includes('>Owner<'));
+    assert.equal(ownerCol, 2, 'Owner is the second column of the platform Stores table');
+    const css = fs.readFileSync(new URL('../public/dash.css', import.meta.url), 'utf8');
+    assert.match(css, new RegExp(`t-stores td:nth-child\\(${ownerCol}\\) \\.dim`),
+      'the id-hiding rule names the column Owner actually sits in');
+  }
+
   // Users carry role flags the owner can filter on.
   const seller = d.users.find((u) => u.discordId === '507700000000000007');
   assert.ok(seller?.seller, 'a store owner is flagged as a seller');
@@ -3902,6 +4205,40 @@ test('platform billing: Free gates at 10 members, paid tiers unlock, switch canc
     assert.equal(granted.status, 200, await granted.text());
   }
   assert.equal((await billingState(u7Cookie)).usage.members, 10);
+
+  // THE SELLER IS NOT ONE OF THEIR OWN MEMBERS. Sellers buy their own role to
+  // check the checkout works; that test used to spend a seat on the plan they
+  // are billed for — and on a full Free store it also refused them, so the one
+  // person who most needs to test the shop was the one who could not. Sitting
+  // at exactly 10/10: the owner's own purchase is allowed, and it does not move
+  // the number.
+  const U7_SELF = '507700000000000007';
+  if (!discord.members.has(U7_SELF)) discord.members.set(U7_SELF, new Set());
+  const ownTest = await fetch(`${appUrl}/api/checkout/stripe`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', cookie: u7Cookie },
+    body: JSON.stringify({ planId, store: 'vip-signals' }),
+  });
+  assert.equal(ownTest.status, 200, `a seller at their limit can still test their own checkout: ${await ownTest.text()}`);
+  const selfGrant = await fetch(`${appUrl}/api/admin/member`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', cookie: u7Cookie },
+    body: JSON.stringify({ store: 'vip-signals', action: 'grant', discordId: U7_SELF, planId }),
+  });
+  assert.equal(selfGrant.status, 200, await selfGrant.text());
+  assert.equal((await billingState(u7Cookie)).usage.members, 10, 'the owner is never counted against their own plan');
+  // ...and the public badge tells the same story as the bill.
+  const badgeStore = await (await fetch(`${appUrl}/api/plans?store=vip-signals`)).json();
+  assert.ok(
+    badgeStore.store.memberCount === null || badgeStore.store.memberCount === 10,
+    `the storefront badge excludes the owner too, saw ${badgeStore.store.memberCount}`,
+  );
+  const selfRevoke = await fetch(`${appUrl}/api/admin/member`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', cookie: u7Cookie },
+    body: JSON.stringify({ store: 'vip-signals', action: 'revoke', discordId: U7_SELF }),
+  });
+  assert.equal(selfRevoke.status, 200, await selfRevoke.text());
 
   // A brand-new buyer is refused at checkout; the platform's own store is not.
   const U10 = '511000000000000010';
@@ -4171,6 +4508,86 @@ test('store themes: validated tokens in, server-rendered CSS out', async () => {
   assert.ok(!plain.includes('store-bg'), 'no background layer once cleared');
 });
 
+// An imported background points at a host nobody at Dues has vetted. The
+// paid gate that used to stand in front of it was never a safety control —
+// it priced the feature, it did not check the URL — so removing it did not
+// widen what a hostile URL can do. What DOES bound it, and what this pins:
+//
+//   • the value only ever becomes a media element's src, escaped. It cannot
+//     run script and never reaches CSS url().
+//   • no referrer. Reproduced against a real browser: without the attribute
+//     the third-party host is told the visit came from the store's origin;
+//     with it, the host learns nothing but the IP it would learn anyway.
+//     Same rule for the two other seller-pasted URLs on the page — the shop
+//     banner and a product photo.
+//   • the extension check is a typo catcher, NOT a promise about the bytes:
+//     a host may answer .gif with a 302 to anything (reproduced). That is
+//     acceptable — an <img> renders pictures or nothing — so the remedy for
+//     a store that abuses it is operational, and it is pinned below.
+test('an imported background is a stranger’s host: no referrer, and an operator can pull it', async () => {
+  const ownerCookie = await signInOn(appUrl, 'code_u7');   // owns vip-signals
+  const setTheme = (theme) =>
+    fetch(`${appUrl}/api/admin/store`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: ownerCookie },
+      body: JSON.stringify({ store: 'vip-signals', theme }),
+    });
+
+  assert.equal((await setTheme({ bg: '#071209', bgUrl: 'https://cdn.example.com/party.gif' })).status, 200);
+  const gif = await (await fetch(`${appUrl}/vip-signals`)).text();
+  assert.match(gif, /<img src="https:\/\/cdn\.example\.com\/party\.gif"[^>]*referrerpolicy="no-referrer"/,
+    'an imported image must not report the visit to the host it came from');
+  // NOT crossorigin: that would make it a CORS request and a host without
+  // access-control-allow-origin would render nothing at all.
+  assert.doesNotMatch(gif.match(/<div class="store-bg"[\s\S]*?<\/div>/)?.[0] ?? '', /crossorigin/,
+    'no crossorigin — it would break honest imports and buys nothing');
+
+  assert.equal((await setTheme({ bg: '#071209', bgUrl: 'https://cdn.example.com/loop.mp4' })).status, 200);
+  assert.match(await (await fetch(`${appUrl}/vip-signals`)).text(),
+    /<video src="https:\/\/cdn\.example\.com\/loop\.mp4"[^>]*referrerpolicy="no-referrer"/,
+    'and neither must an imported video');
+
+  // The other two seller-pasted URLs that land on the same page.
+  const storeHtml = fs.readFileSync(path.join(ROOT, 'public', 'store.html'), 'utf8');
+  for (const id of ['shop-banner', 'shop-banner-video', 'product-shot']) {
+    assert.match(storeHtml.match(new RegExp(`<(?:img|video)[^>]*id="${id}"[^>]*>`))?.[0] ?? '',
+      /referrerpolicy="no-referrer"/, `#${id} carries a seller-pasted URL and must not leak the visit`);
+  }
+  const appJs = fs.readFileSync(path.join(ROOT, 'public', 'app.js'), 'utf8');
+  for (const m of appJs.match(/<(?:img|video) class="prod-shot[^>]*>/g) ?? []) {
+    assert.match(m, /referrerpolicy="no-referrer"/, `a product card's media must not leak the visit: ${m.slice(0, 60)}`);
+  }
+  // /discover puts dozens of seller-chosen hosts on one page — same rule.
+  const discJs = fs.readFileSync(path.join(ROOT, 'public', 'discover.js'), 'utf8');
+  const discTags = discJs.match(/<(?:img|video) class="disc-banner-media[^>]*>/g) ?? [];
+  assert.equal(discTags.length, 2, 'both directory banner tags are still built here');
+  for (const m of discTags) assert.match(m, /referrerpolicy="no-referrer"/, `a directory banner must not leak the visit: ${m.slice(0, 60)}`);
+
+  // THE REMEDY. A store that puts something ugly on a dues.gg URL is pulled
+  // down by the platform owner, not by asking its seller nicely: OWNER_
+  // DISCORD_ID may write any store's row. Without this, "take it down" means
+  // hand-editing the database.
+  const strangerCookie = await signInOn(appUrl, 'code_u3');
+  const asStranger = await fetch(`${appUrl}/api/admin/store`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', cookie: strangerCookie },
+    body: JSON.stringify({ store: 'vip-signals', theme: null }),
+  });
+  assert.equal(asStranger.status, 403, 'a signed-in stranger cannot touch a store that is not theirs');
+
+  const platformCookie = await signInOn(appUrl, 'code_u1'); // OWNER_DISCORD_ID
+  const pulled = await fetch(`${appUrl}/api/admin/store`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', cookie: platformCookie },
+    body: JSON.stringify({ store: 'vip-signals', theme: null, bannerUrl: '', discoverable: false }),
+  });
+  assert.equal(pulled.status, 200, 'the platform owner can pull a hostile import off a store they do not own');
+  const pulledPage = await (await fetch(`${appUrl}/vip-signals`)).text();
+  assert.ok(!pulledPage.includes('store-bg'), 'and the imported background is gone from the served page');
+  assert.equal((await (await fetch(`${appUrl}/api/discover?fresh=1`)).json()).stores.some((s) => s.slug === 'vip-signals'),
+    false, 'and the store is out of the public directory');
+});
+
 test('discover: opt-in directory of live stores, real numbers only', async () => {
   const login = await fetch(`${appUrl}/auth/login`, { redirect: 'manual' });
   const st = new URL(login.headers.get('location')).searchParams.get('state');
@@ -4352,8 +4769,17 @@ test('products managed in-site: edit/toggle/limit/success-url/lazy price/discoun
   });
   assert.equal(opRes.status, 200, 'platform owner bypass on onboard steps');
   // Sellers get the dashboard nav link; buyers do not.
-  assert.equal((await (await fetch(`${appUrl}/api/me`, { headers: { cookie: u7Cookie } })).json()).seller, true, 'store owner is flagged seller');
-  assert.equal((await (await fetch(`${appUrl}/api/me`, { headers: { cookie: u9Cookie } })).json()).seller, false, 'buyer is not');
+  const meSeller = await (await fetch(`${appUrl}/api/me`, { headers: { cookie: u7Cookie } })).json();
+  const meBuyer = await (await fetch(`${appUrl}/api/me`, { headers: { cookie: u9Cookie } })).json();
+  assert.equal(meSeller.seller, true, 'store owner is flagged seller');
+  assert.equal(meBuyer.seller, false, 'buyer is not');
+  // And WHICH stores they run, so a storefront can point its owner back at the
+  // dashboard for the store they are standing in. A seller reaches their own
+  // shop from that dashboard — usually in a fresh tab, where the browser's
+  // back button is dead — and a generic "/dashboard" link put them back at the
+  // server picker instead of where they came from.
+  assert.ok(meSeller.owns.includes('vip-signals'), 'a seller is told which stores are theirs');
+  assert.deepEqual(meBuyer.owns, [], 'a buyer is told about no store, not even one they bought from');
 
   // Second product, monthly — created in the site, extras applied, role picked.
   const made = await onboard({ step: 'product', storeId, name: 'Signals Monthly', description: 'Every signal, monthly.', priceUsd: 15, lifetime: false, durationDays: 31 });
@@ -4546,6 +4972,22 @@ test('products managed in-site: edit/toggle/limit/success-url/lazy price/discoun
   assert.equal(dp.accent, '#5865f2', 'accent saved lowercased');
   assert.equal(dp.cards.mrr, false, 'hidden stat cards persist');
   assert.equal(dp.defaultRange, '90', 'default period persists');
+  // The dashboard's face, as the two keys the picker writes: `light` for the
+  // white face, `darkStyle` for which dark the header button goes back to.
+  // Both have to survive the round trip or the seller's choice is a preview
+  // that dies on reload — and "light + black" has to be storable together,
+  // because that is a white dashboard whose moon returns to black.
+  assert.equal((await storeCall({ dashboardPrefs: { light: true, darkStyle: 'black' } })).status, 200);
+  const faceRead = async () => (await (await fetch(`${appUrl}/api/admin/payments?store=vip-signals`, { headers: { cookie: u7Cookie } })).json())
+    .stores.find((s) => s.slug === 'vip-signals').dashboardPrefs;
+  assert.deepEqual(await faceRead(), { darkStyle: 'black', light: true }, 'the light face and its dark half both persist');
+  assert.equal((await storeCall({ dashboardPrefs: { darkStyle: 'black' } })).status, 200);
+  assert.deepEqual(await faceRead(), { darkStyle: 'black' }, 'going back to the dark face drops the light key');
+  // Only the non-default value of each is stored, and only the real boolean:
+  // a truthy string is not a face.
+  assert.equal((await storeCall({ dashboardPrefs: { light: 'yes', darkStyle: 'navy' } })).status, 200);
+  assert.equal(await faceRead(), null, 'navy and not-light are the defaults, so nothing is written at all');
+  assert.equal((await storeCall({ dashboardPrefs: { accent: '#5865F2', cards: { mrr: false }, defaultRange: '90' } })).status, 200);
   assert.equal((await storeCall({ dashboardPrefs: null })).status, 200, 'prefs reset clears the row');
   assert.equal((await storeCall({ showMembers: false })).status, 200);
   const pubOff = await (await fetch(`${appUrl}/api/plans?store=vip-signals`)).json();
@@ -5468,12 +5910,37 @@ test('storefront client: the failure states the suite cannot drive in a browser 
   // one-product store whose product has price options must not grow a button
   // leading to a one-card shop it was designed never to show.
   assert.match(app, /const multi = state\.plans\.filter\(\(p\) => !p\.variantOf\)\.length > 1;/, 'the back-to-shop button counts products, not price options');
+  // ...but it is never the reason the slot is EMPTY. A one-product store is
+  // routed straight into its order card, so with no link up to the store page
+  // that card is the whole storefront and a fresh tab (the dashboard's "View
+  // store", a QR code, a link posted in Discord) has nothing on it that goes
+  // anywhere. scripts/verify-store-escape.mjs drives this in a browser; the
+  // line is held here so `npm test` alone still catches its removal.
+  assert.match(app, /back\.hidden = !\(STORE_SLUG && state\.view === 'checkout'\);/, 'every store checkout offers the way up to its store page');
+  // The crypto pay screen has no pay button by design (a second invoice would
+  // split the payment across two addresses) and hides the method tiles, so its
+  // cancel control is the only thing on it that goes anywhere.
+  assert.match(app, /if \(state\.cryptoOrder\) \{\s*\n\s*box\.hidden = true;/, 'the method tiles stand down while a crypto order is open');
+  assert.match(app, /const cancel = \$\('#cryptopay-cancel'\);/, 'the crypto pay screen wires its own exit');
+  const dash = read('dashboard.js');
+  // The Appearance preview is a live storefront in an iframe with no address
+  // bar and no back button. Clicking through it walked the frame into the
+  // checkout and then out to Stripe, and its header offered "Sign out" —
+  // which signed the owner out of the dashboard around it.
+  assert.match(dash, /f\.contentDocument\?\.addEventListener\(\s*\n?\s*'click',/, 'the store preview swallows clicks instead of navigating the frame');
   // "Lifetime (lifetime)": the parent option's synthesised label is its cadence.
   assert.match(app, /sameWord \? '' : `<small>\$\{cadence\}<\/small>`/, 'the cadence suffix is dropped when the label already is the cadence');
   // A Discord CDN miss falls back to the letter placeholder instead of a hole,
   // and a url that already failed is not re-shown by the next render.
   assert.match(app, /icon\.dataset\.failed !== state\.server\.iconUrl/, 'the shop avatar remembers a failed url');
   assert.match(app, /logo\.dataset\.failed !== state\.server\.iconUrl/, 'the checkout server icon remembers a failed url');
+  // Every page a buyer can be standing on mid-purchase wears the same header
+  // mark, and on every one of them it is a LINK. The receipt's was a bare
+  // <img>: the one page reached straight from Stripe, where a dead logo is the
+  // difference between "click the thing that always goes home" and nothing.
+  for (const f of ['store.html', 'receipt.html', 'account.html', 'dashboard.html']) {
+    assert.match(read(f), /<a href="\/"><img class="platform-mark"/, `${f}'s header mark must link home`);
+  }
   const store = read('store.html');
   const img = (marker) => store.match(new RegExp(`<img[^>]*${marker}[^>]*>`))?.[0] ?? '';
   assert.match(img('id="shop-icon"'), /onerror="[^"]*shop-icon-ph[^"]*"/, '#shop-icon swaps to the placeholder on error');
@@ -5498,6 +5965,41 @@ test('storefront client: the failure states the suite cannot drive in a browser 
   assert.match(receipt, /plansRes\.ok \? await plansRes\.json\(\)/, 'a failed catalogue degrades to empty so the buyer\'s own subscription row still names the order');
   assert.match(receipt, /if \(!plan\) return showNotFound\(\)/, 'a missing ?plan renders the not-found receipt');
   assert.match(read('receipt.html'), /<section class="panel" id="r-details">/, 'the details panel is addressable so the not-found state can hide its dashes');
+
+  // ── the demo checkout ─────────────────────────────────────────────────────
+  // /demo plays the page a buyer really lands on. Two things hold it in place
+  // and neither can be checked from the network: it must stay INCAPABLE of
+  // taking a card, and it must not pass itself off as Stripe's own page.
+  const demo = app.slice(app.indexOf('function demoCheckout(plan) {'), app.indexOf('async function pay(btn, plan)'));
+  assert.ok(demo.length > 2000, 'demoCheckout must still be there to check');
+  for (const banned of ['<form', '<input', '<textarea', '<select', 'contenteditable', 'fetch(']) {
+    assert.ok(!demo.includes(banned), `the demo checkout must contain no ${banned} — it cannot be able to take a card`);
+  }
+  // It says what it is ABOVE anything form-shaped, and keeps saying it.
+  assert.match(demo, /<p class="dcx-strip"><b>Demo<\/b>/, 'the demo strip spans the top of the panel');
+  assert.match(demo, /<span class="dcx-badge">Demo<\/span>/, 'and the badge is still on the pay column');
+  assert.match(app, /if \(state\.capabilities\.demo\) \{\n    const demoNote/, 'the demo store says nothing is for sale BEFORE the button is pressed, not only after');
+  // Mode decides the page the way the hosted one does: a recurring price is
+  // headed "Subscribe to <product>" and pays with Subscribe, a one-off is
+  // headed "Pay <merchant>" and pays with Pay.
+  assert.match(demo, /const sub = Boolean\(plan\.interval\);/, 'the demo splits on subscription vs one-off');
+  assert.match(demo, /sub \? `Subscribe to \$\{esc\(plan\.name\)\}` : `Pay \$\{esc\(merchant\)\}`/, 'the summary heading follows the mode');
+  assert.match(demo, /\$\{sub \? 'Subscribe' : 'Pay'\}<\/button>/, 'so does the button label');
+  assert.match(demo, /Total due\$\{sub \? ' today' : ''\}/, 'and the total line');
+  assert.match(demo, /By confirming your subscription/, 'a subscription carries the mandate sentence the buyer really agrees to');
+  // The fields a buyer meets, in the order they meet them — every one a div.
+  assert.deepEqual(
+    [...demo.matchAll(/data-f="([a-z]+)"/g)].map((m) => m[1]),
+    ['email', 'card', 'exp', 'cvc', 'name', 'country', 'zip'],
+    'email, card group, cardholder name, country + postal — the hosted page\'s own order',
+  );
+  // The trust mark that page really carries, as plain text in our own type…
+  assert.match(demo, /Powered by Stripe/, 'the factual trust mark stays');
+  // …and nothing that wears Stripe's identity instead of stating a fact.
+  assert.doesNotMatch(demo, /stripe\.com|stripe[-_.]?(logo|mark|wordmark|svg|png)/i, 'the demo must not reproduce Stripe\'s own mark');
+  const css = read('styles.css');
+  assert.match(css, /\.dcx-strip \{[^}]*position: sticky/, 'the demo strip stays put while the panel scrolls');
+  assert.match(css, /@media \(min-width: 761px\) \{ \.dcx-sumbar \{ display: none; \} \}/, 'the summary sits beside the form on a laptop and folds into a disclosure on a phone');
 });
 
 test('store creator and team: seller-authored, validated, and round-tripped to both payloads', async () => {
@@ -5824,6 +6326,10 @@ test('crypto: checkout creates a payment carrying the payout address and its own
   nowpayments.noCoins = false;
   const coins = await (await fetch(`${appUrl}/api/checkout/crypto?coins=1&store=vip-signals`)).json();
   assert.equal(coins.ready, true, 'the empty answer was not cached');
+  // Read out of the key NOWPayments actually documents for /v1/merchant/coins
+  // — their sample answers `{"currencies": [...]}`, and `selectedCurrencies`
+  // appears nowhere in their docs. The parser tolerates both; this is the one
+  // that has to work.
   assert.deepEqual(coins.coins, ['sol', 'usdtsol', 'btc', 'eth', 'xmr'], 'tickers arrive lowercased and cheapest chains first');
 
   const plans = await (await fetch(`${appUrl}/api/plans?store=vip-signals`)).json();
@@ -5862,6 +6368,20 @@ test('crypto: checkout creates a payment carrying the payout address and its own
   assert.equal(sent.ipn_callback_url, 'https://tradeleaks.e2e/api/webhooks/nowpayments', 'there is no IPN field in the dashboard, so it rides on every create');
   assert.equal(sent.price_amount, plan.priceUsd);
   assert.equal(sent.order_id, order.orderId);
+  // The three fields NOWPayments marks required on POST /v1/payment, and the
+  // pair of flow flags every payment here rides on. `is_fee_paid_by_user`
+  // cannot stand alone — the provider forces fixed rate under it — so sending
+  // it without `is_fixed_rate` would leave the fixed-rate quote the pay screen
+  // counts down to as an accident rather than a request.
+  assert.deepEqual(
+    { p: typeof sent.price_amount, c: sent.price_currency, pc: sent.pay_currency, fr: sent.is_fixed_rate, fee: sent.is_fee_paid_by_user },
+    { p: 'number', c: 'usd', pc: 'sol', fr: true, fee: true },
+  );
+  // pay_amount is left out ON PURPOSE: it is optional, and omitting it is what
+  // makes the provider convert price_amount at ITS rate. Filling it in would
+  // quote the buyer a coin figure of our own that the invoice is then judged
+  // against.
+  assert.equal('pay_amount' in sent, false, 'the coin figure is the provider\'s to compute, not ours to assert');
 
   // The order row exists BEFORE any money can move — it is the only mapping
   // back from an IPN to which buyer bought what.
@@ -6565,6 +7085,13 @@ test('crypto: waiting and partially_paid show progress and grant nothing', async
   assert.equal(view.state, 'short');
   assert.match(view.message, /still outstanding/);
   assert.match(view.message, /SOL/, 'same-coin shortfalls can also be quoted in the coin');
+  // A top-up to a used deposit address is a REPEATED DEPOSIT: NOWPayments
+  // "will automatically create a new payment with another id", so the payment
+  // this screen polls stays partially_paid whatever the buyer sends next.
+  // Telling them to send the difference to finish it promises a completion
+  // this rail cannot show them.
+  assert.doesNotMatch(view.message, /same address to complete/i, 'the provider does not complete this payment from a second deposit');
+  assert.match(view.message, /separate payment/, 'say what a second deposit actually does');
 
   // Somebody else's order is not readable, however guessable the id is.
   const other = await fetch(`${appUrl}/api/checkout/crypto?store=vip-signals&order=${npOrder.orderId}`, {
@@ -6588,6 +7115,32 @@ test('crypto: a wrong-asset deposit is judged on fiat, never on the coin that wa
     'telling someone who paid in another coin to send more SOL is worse than saying nothing',
   );
   assert.equal(settledFiat(payment), payment.actually_paid_at_fiat);
+});
+
+test('crypto: a short payment the provider priced no fiat on quotes no figure at all', async () => {
+  // `actually_paid_at_fiat` is documented on the IPN body and on nothing else:
+  // NOWPayments' own sample response for GET /v1/payment/:id — the call the
+  // pay screen polls through — does not carry the field, and their IPN example
+  // ships it as 0. So the field being absent is the ORDINARY case on this
+  // path, not an edge one, and it is the only field that says what a deposit
+  // was worth independently of the coin the invoice asked for.
+  //
+  // Without it there is no shortfall anyone can name. The buyer gets the
+  // figureless wording; nothing derives a dollar amount from the coin ratio,
+  // because that ratio assumes the deposit was in pay_currency, which is the
+  // one thing an underpayment on a wrong-asset account may not have been.
+  const payment = nowpayments.payments.get('npid_1');
+  payment.payment_status = 'partially_paid';
+  payment.actually_paid = 0.35;
+  delete payment.actually_paid_at_fiat;
+
+  const view = await (await fetch(`${appUrl}/api/checkout/crypto?store=vip-signals&order=${npOrder.orderId}`, {
+    headers: { cookie: npBuyerCookie },
+  })).json();
+  assert.equal(view.state, 'short');
+  assert.doesNotMatch(view.message, /\d/, 'no fiat figure, no number quoted — an invented one reads as fact');
+  assert.doesNotMatch(view.message, /SOL/, 'and no coin figure either');
+  assert.match(view.message, /separate payment/, 'the honest instruction still stands');
 });
 
 test('crypto: finished grants a fixed term, and the same IPN twice grants once', async () => {
@@ -6941,7 +7494,22 @@ test("crypto: an open invoice holds its seat and its discount use for the invoic
   const under = await start(aCookie, { planId: tiny.planKey, payCurrency: 'btc' });
   assert.equal(under.status, 409);
   assert.match((await under.json()).error, /network minimum of about 0\.004 BTC/);
-  assert.deepEqual(nowpayments.minAmount.at(-1), { from: 'btc', to: 'sol' }, 'the minimum quoted is the one that refused the order');
+  // Both halves of the pair AND the flow. Every payment this rail creates is
+  // fixed-rate with the fee paid by the user, and NOWPayments documents a
+  // different floor for that flow than for the standard one — a minimum
+  // fetched without the flags is a number from a flow the buyer is not on.
+  assert.deepEqual(
+    nowpayments.minAmount.at(-1),
+    { from: 'btc', to: 'sol', fixedRate: 'true', feePaidByUser: 'true', fiat: 'usd' },
+    'the minimum quoted is the one that refused the order, on the flow that refused it',
+  );
+  assert.deepEqual(
+    nowpayments.created.at(-1) === undefined
+      ? null
+      : { fixed: nowpayments.created.at(-1).is_fixed_rate, fee: nowpayments.created.at(-1).is_fee_paid_by_user },
+    { fixed: true, fee: true },
+    'the flow the minimum was asked for is the flow createPayment actually sends',
+  );
   {
     const { rows } = await tq('SELECT * FROM checkout_attempts WHERE discord_id = ? AND plan_id = ?', [A, tiny.planKey]);
     assert.equal(rows.length, 1);
@@ -7398,6 +7966,81 @@ test('crypto: no coin figure without evidence, and a status nobody knows is "che
   const view = await npView(order.orderId);
   assert.equal(view.state, 'pending');
   assert.match(view.message, /Checking on this payment/);
+});
+
+test('crypto: a provider-shaped IPN — nested fee object, array of child ids, non-ASCII description — verifies', async () => {
+  // Checked against the IPN body in NOWPayments' own API documentation
+  // (documenter.getpostman.com/view/7907941/2s93JusNJt, "Webhooks Examples")
+  // and against their Node SDK's sortObjectDeep. A real delivery is NOT flat:
+  //
+  //   • `fee` is a nested object, and its keys do not arrive sorted —
+  //     depositFee, withdrawalFee, serviceFee is the documented order, so a
+  //     sort that only touches the top level signs a different string;
+  //   • `payment_extra_ids` is an array of child deposits — an implementation
+  //     that rebuilt it as an object would render {"0":…};
+  //   • `order_description` is ours, em dash and all — escaping it as \u2014
+  //     is a fourth way to diverge.
+  //
+  // Every other crypto scenario delivers a flat ASCII body, which all three
+  // bugs survive. The order is deliberately not one of ours: this pins the
+  // signature, and nothing else.
+  nowpayments.payments.set('npid_shaped', {
+    payment_id: 'npid_shaped',
+    payment_status: 'finished',
+    order_id: 'np_00000000000000000000000000000001',
+    price_amount: 49.99,
+    price_currency: 'usd',
+    pay_currency: 'sol',
+  });
+  const ipn = {
+    payment_id: 'npid_shaped',
+    parent_payment_id: null,
+    invoice_id: null,
+    payment_status: 'finished',
+    pay_address: 'ADDR_npid_shaped',
+    payin_extra_id: null,
+    price_amount: 49.99,
+    price_currency: 'usd',
+    pay_amount: 0.5,
+    actually_paid: 0.5,
+    actually_paid_at_fiat: 0,
+    pay_currency: 'sol',
+    order_id: 'np_00000000000000000000000000000001',
+    order_description: 'VIP Signals — Dues',
+    purchase_id: '5312822613',
+    outcome_amount: 0.4985,
+    outcome_currency: 'sol',
+    payment_extra_ids: [5513339153],
+    fee: { currency: 'sol', depositFee: 0.09853637216235617, withdrawalFee: 0, serviceFee: 0 },
+  };
+  assert.equal((await deliverNow(ipn)).status, 200, 'the shape the provider actually sends has to verify');
+  assert.equal((await deliverNow(ipn, { signature: signNow({ ...ipn, actually_paid: 0.6 }) })).status, 400, 'and a signature over anything else must not');
+});
+
+test('crypto: `cancelled` is a status the provider really sends, and it ends the payment', async () => {
+  // Not in the API reference's list of nine. The provider's status article
+  // has it — a merchant can mark a partially_paid payment cancelled so the
+  // buyer gets in touch — and their Node SDK maps both spellings. Treated as
+  // an unknown status it was the one dead payment whose screen kept saying
+  // "Checking on this payment…", and whose seat the backfill never released.
+  const { describeStatus, DEAD } = await import('../src/lib/nowpayments.js');
+  assert.equal(describeStatus({ payment_status: 'cancelled' }).state, 'dead');
+  assert.ok(DEAD.has('canceled'), 'the provider spells it both ways');
+
+  const plans = await (await fetch(`${appUrl}/api/plans?store=vip-signals`)).json();
+  const { order, payment } = await npCheckout(plans.plans[0].id);
+  payment.payment_status = 'cancelled';
+  assert.equal((await deliverNow({ payment_id: payment.payment_id, payment_status: 'cancelled', order_id: order.orderId })).status, 200);
+  await waitFor('the cancelled payment to be logged as ended', () =>
+    appLog.join('').includes(`nowpayments ${payment.payment_id} (order ${order.orderId}) ended as cancelled`));
+  assert.ok(
+    !appLog.join('').includes(`nowpayments ${payment.payment_id} (order ${order.orderId}) has unrecognised status`),
+    'a documented status is not an unknown one',
+  );
+  assert.equal(await subRow('nowpayments', payment.payment_id), null, 'a cancelled payment is not a sale');
+  const view = await npView(order.orderId);
+  assert.equal(view.state, 'dead');
+  assert.match(view.message, /did not complete/);
 });
 
 test('crypto: money that lands for a product that cannot be delivered is never a completed sale', async () => {
