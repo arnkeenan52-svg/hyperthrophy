@@ -86,12 +86,26 @@ export default guard(async function handler(req, res) {
     // Guild id is public (it's in every invite link); the receipt page needs
     // it for the "Open on Discord" deep link.
     server: { name, guildId: store.guildId, iconUrl },
-    capabilities: store.isDefault ? capabilities() : { stripe: Boolean(store.stripeKey), crypto: false },
+    currency: store.currency ?? 'usd',
+    // What this particular store can actually take money with. A tenant
+    // store's crypto rail needs BOTH the platform's NOWPayments credentials
+    // and that seller's own payout wallet — the platform half alone would
+    // offer a button whose only outcome is the custody refusal at checkout.
+    capabilities: store.isDefault
+      ? { ...capabilities(), nowpayments: capabilities().nowpayments && Boolean(store.cryptoWallet) }
+      : {
+          stripe: Boolean(store.stripeKey),
+          crypto: false,
+          nowpayments: capabilities().nowpayments && Boolean(store.cryptoWallet),
+        },
     plans: plans.map((p) => ({
       id: p.id,
       name: p.name,
       description: p.description,
       priceUsd: p.priceUsd,
+      // What that number is denominated in. Without this the page has no way
+      // to know whether 1500 means $1,500.00 or ¥1,500 and would guess wrong.
+      currency: p.currency ?? 'usd',
       interval: p.interval,
       lifetime: Boolean(p.lifetime),
       imageUrl: p.imageUrl ?? null,

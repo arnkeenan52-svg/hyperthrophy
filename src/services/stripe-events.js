@@ -7,6 +7,7 @@ import { sendReceiptEmail } from '../lib/email.js';
 import { postChannelMessage } from '../lib/discord.js';
 import { getUser } from '../db.js';
 import { activatePlatformPlan, applyPlatformSubscriptionEvent, isPlatformSubscription } from './billing.js';
+import { fromMinor, formatAmount, normalize as normalizeCurrency } from '../lib/currency.js';
 
 // Which store an event belongs to. SECURITY: a per-store endpoint verified
 // this delivery with that store's OWN signing secret, so the event provably
@@ -52,14 +53,21 @@ export async function processStripeEvent(event, routeStore = null) {
         return;
       }
       const store = await resolveStore(routeStore, obj.metadata?.store_id);
-      // A redeemed discount counts its use only once payment completed.
-      if (obj.metadata?.discount_code && store?.id !== null && store?.id !== undefined) {
+      // A redeemed discount counts its use once the GRANT has landed, not
+      // before it. Counted up here, a grant that threw sent the webhook to
+      // 500, Stripe retried, and the retry counted the same sale again —
+      // burning a seller's five-use promotion two uses at a time.
+      const countDiscount = async () => {
+        if (!obj.metadata?.discount_code || store?.id === null || store?.id === undefined) return;
         const { incrementDiscountUse } = await import('../db.js');
         await incrementDiscountUse(store.id, obj.metadata.discount_code).catch(() => {});
-      }
+      };
       // What Stripe actually charged (discounts included). The plan's list
       // price is only a fallback for events without an amount.
-      const paidUsd = typeof obj.amount_total === 'number' ? obj.amount_total / 100 : null;
+      // amount_total is in MINOR units and the divisor is not always 100 — a
+      // ¥1500 sale reports 1500, which /100 would record and announce as ¥15.
+      const paidCurrency = normalizeCurrency(obj.currency ?? store?.currency);
+      const paidUsd = typeof obj.amount_total === 'number' ? fromMinor(obj.amount_total, paidCurrency) : null;
       // Sale ping to the owner's chosen channel (best-effort): every order
       // posts an embed the moment the grant lands.
       const notifySale = async () => {
@@ -73,7 +81,7 @@ export async function processStripeEvent(event, routeStore = null) {
             title: '🎉 New Subscriber!',
             description:
               `**${buyer}** just subscribed to **${plan?.name ?? planId}**` +
-              `${plan?.lifetime ? ' (lifetime)' : ''}.\n\nPayment received: **$${Number(amount).toFixed(2)}**`,
+              `${plan?.lifetime ? ' (lifetime)' : ''}.\n\nPayment received: **${formatAmount(amount, plan?.currency ?? paidCurrency)}**`,
             // Blurple, not white. A white embed stripe is invisible against
             // Discord's light theme -- the accent bar renders #ffffff on an
             // #f2f3f5 embed, so every seller whose members run light mode has
@@ -97,6 +105,7 @@ export async function processStripeEvent(event, routeStore = null) {
           storeName: store?.name ?? config.brand,
           planName: plan?.name ?? planId,
           amountUsd: paidUsd ?? plan?.priceUsd ?? 0,
+          currency: plan?.currency ?? paidCurrency,
           lifetime: Boolean(plan?.lifetime),
           discordUsername: user?.username ?? null,
           reference: obj.id,
@@ -114,7 +123,9 @@ export async function processStripeEvent(event, routeStore = null) {
           periodEnd: subscriptionPeriodEnd(sub),
           store,
           paidUsd,
+          currency: paidCurrency,
         });
+        await countDiscount();
         await emailReceipt();
         await notifySale();
       } else {
@@ -128,7 +139,9 @@ export async function processStripeEvent(event, routeStore = null) {
           periodEnd: null,
           store,
           paidUsd,
+          currency: paidCurrency,
         });
+        await countDiscount();
         await emailReceipt();
         await notifySale();
       }
@@ -182,6 +195,12 @@ export async function processStripeEvent(event, routeStore = null) {
         return;
       const row = await getSubscriptionByRef('stripe', obj.id);
       if (!row) return;
+      // Same rule as markPastDue: a deliberately revoked row is not resurrected
+      // by routine traffic. Stripe still calls the subscription 'active' after a
+      // refund or a dispute (nothing here cancels it at Stripe), and the buyer's
+      // own cancel button posts cancel_at_period_end, which emits exactly this
+      // event.
+      if (row.status === 'canceled') return;
       if (obj.status === 'active' || obj.status === 'trialing') {
         const periodEnd = subscriptionPeriodEnd(obj);
         await setSubscriptionStatus(row.id, {

@@ -3,8 +3,8 @@ import { storeBySlug, planOf } from '../../src/services/stores.js';
 import { sendJson, sendText, readJsonBody, guard } from '../../src/lib/http.js';
 import { sessionUserId } from '../../src/lib/session.js';
 import { createCheckoutSession, stripeFetch } from '../../src/lib/stripe.js';
-import { memberLimitBlocks } from '../../src/services/billing.js';
-import { getGuildMember } from '../../src/lib/discord.js';
+import { fromMinor, toMinor, normalize as normalizeCurrency, minCharge, formatAmount } from '../../src/lib/currency.js';
+import { purchaseBlocked, resolveDiscount } from '../../src/services/purchase-guard.js';
 import * as db from '../../src/db.js';
 
 export default guard(async function handler(req, res) {
@@ -32,85 +32,79 @@ export default guard(async function handler(req, res) {
     sendJson(res, 400, { error: 'unknown plan' });
     return;
   }
-  if (plan.active === false) {
-    sendJson(res, 409, { error: 'This product is not for sale right now.' });
+  // Every rule that can stop this sale — inactive, expired, role-gated,
+  // sold out, or the owner's member cap — lives in one shared guard so the
+  // card and crypto rails cannot enforce different ones.
+  const blocked = await purchaseBlocked({ store, plan, uid });
+  if (blocked) {
+    sendJson(res, blocked.status, { error: blocked.error });
     return;
   }
-  // Limited-time products refuse new purchases past their end date — the
-  // storefront hides them, but the link may be cached or shared.
-  if (plan.expiresAt && plan.expiresAt <= Math.floor(Date.now() / 1000)) {
-    sendJson(res, 409, { error: 'This product is no longer available.' });
-    return;
-  }
-  // Gated products: the buyer must already hold the required role in the
-  // store's server. Verified against Discord at purchase time — a chip on
-  // the page is advice, this is the enforcement.
-  if (plan.requiredRoleId) {
-    const member = await getGuildMember(uid, store.guildId).catch(() => null);
-    if (!member || !(member.roles ?? []).includes(plan.requiredRoleId)) {
-      sendJson(res, 403, {
-        error: `This product is for ${plan.requiredRoleName ?? 'members with a specific role'} members only — unlock that first, then come back.`,
-      });
-      return;
-    }
-  }
-  // Purchase limit: caps total distinct buyers, never a returning one.
-  if (plan.purchaseLimit !== null && plan.purchaseLimit !== undefined) {
-    const own = (await db.subscriptionsForMember(uid)).some((s) => {
-      const sid = s.store_id === null || s.store_id === undefined ? null : Number(s.store_id);
-      return sid === (store.id ?? null) && s.plan_id === plan.id;
+  // A managed store whose sealed key will not open (a rotated SESSION_SECRET)
+  // must not reach Stripe at all — not for a coupon, not for a session. The
+  // session builder refuses on its own, but the coupon call ran BEFORE it and
+  // told a buyer with a code that the discount was broken, with `null` as the
+  // bearer. Same sentence as the session failure: the cause is the same.
+  if (store.id !== null && store.id !== undefined && !store.stripeKey) {
+    console.error(`[checkout] store ${store.slug}: its Stripe key cannot be read — reconnect Stripe in Settings before selling`);
+    sendJson(res, 502, {
+      error: "Payment could not be started — the store's payment setup is incomplete. Please try again shortly.",
     });
-    if (!own && (await db.countBuyersOfPlan(store.id ?? null, plan.id)) >= plan.purchaseLimit) {
-      sendJson(res, 409, { error: 'This product is sold out.' });
-      return;
-    }
+    return;
   }
   // Discount code → a one-shot Stripe coupon on the store's own account.
   // Validated here; the completed-checkout webhook counts the use.
   let couponId = null;
   let discountCode = null;
-  const codeRaw = typeof body?.discountCode === 'string' ? body.discountCode.trim().toUpperCase() : '';
-  if (codeRaw) {
-    const now = Math.floor(Date.now() / 1000);
-    const d = store.id !== null && store.id !== undefined ? await db.getDiscount(store.id, codeRaw) : null;
-    const valid =
-      d &&
-      // A product-scoped code covers the product's price options too.
-      (d.planKey === null || d.planKey === plan.id || d.planKey === plan.variantOf) &&
-      (d.expiresAt === null || d.expiresAt > now) &&
-      (d.maxUses === null || d.uses < d.maxUses);
-    if (!valid) {
-      sendJson(res, 400, { error: 'That discount code is not valid for this product.' });
+  const wanted = typeof body?.discountCode === 'string' ? body.discountCode : '';
+  if (wanted.trim()) {
+    const applied = await resolveDiscount({ store, plan, code: wanted });
+    if (applied.error) {
+      sendJson(res, 400, { error: applied.error });
       return;
     }
+    // A code that drags the total under Stripe's per-currency floor cannot be
+    // charged by any card; Stripe would refuse the session with an error the
+    // buyer never gets to read. Say it here, before minting anything.
+    {
+      const cur = normalizeCurrency(plan.currency);
+      if (applied.priceAfter > 0 && applied.priceAfter < minCharge(cur)) {
+        sendJson(res, 409, {
+          error: `That code brings the total under the ${cur.toUpperCase()} minimum of ${formatAmount(minCharge(cur), cur)}, which no card payment can clear.`,
+        });
+        return;
+      }
+    }
+    const d = applied.row;
+    // A fixed discount is money, so it carries the plan's currency and the
+    // plan's minor-unit factor. Hardcoded 'usd' × 100 minted a ¥500-off
+    // coupon as a $500-off one — refused by Stripe at best, and at worst a
+    // discount a hundred times the intended size.
+    const terms = d.kind === 'percent'
+      ? { percent_off: Math.min(100, Math.max(1, d.amount)) }
+      : { amount_off: toMinor(Math.min(d.amount, plan.priceUsd), plan.currency), currency: normalizeCurrency(plan.currency) };
+    // One coupon per (store, code, terms), reused across attempts. Stripe lets
+    // the caller pick the coupon id, so a failed or abandoned checkout leaves
+    // nothing new on the seller's account, and an edited discount gets a fresh
+    // coupon because its terms are in the id. Codes are already [A-Z0-9_-].
+    const couponKey = `dues_${store.id ?? 'default'}_${applied.code}_${d.kind === 'percent' ? `p${terms.percent_off}` : `a${terms.amount_off}${terms.currency}`}`
+      .replace(/[^A-Za-z0-9_-]/g, '_');
     try {
-      const coupon = await stripeFetch('/v1/coupons', {
+      await stripeFetch('/v1/coupons', {
         method: 'POST',
         key: store.stripeKey,
-        form: {
-          duration: 'once',
-          name: codeRaw,
-          ...(d.kind === 'percent'
-            ? { percent_off: Math.min(100, Math.max(1, d.amount)) }
-            : { amount_off: Math.round(Math.min(d.amount, plan.priceUsd) * 100), currency: 'usd' }),
-        },
+        form: { id: couponKey, duration: 'once', name: applied.code, ...terms },
+      }).catch((err) => {
+        // Already minted by an earlier attempt: reuse it.
+        if (!/resource_already_exists|already exists/i.test(err.message)) throw err;
       });
-      couponId = coupon.id;
-      discountCode = codeRaw;
+      couponId = couponKey;
+      discountCode = applied.code;
     } catch (err) {
-      console.error(`[checkout] coupon for ${codeRaw} on ${store.slug} failed: ${err.message}`);
+      console.error(`[checkout] coupon for ${applied.code} on ${store.slug} failed: ${err.message}`);
       sendJson(res, 502, { error: 'Could not apply that discount — try again shortly.' });
       return;
     }
-  }
-  // The owner's Dues plan caps how many members their stores can hold.
-  // Existing members are never blocked — only brand-new signups wait until
-  // the owner upgrades.
-  if (await memberLimitBlocks(store, uid)) {
-    sendJson(res, 409, {
-      error: 'This store is at its member limit right now. The owner has been shown an upgrade prompt — please try again soon.',
-    });
-    return;
   }
   // Optional buyer note — rides into Stripe metadata so the owner sees it on
   // the payment in the Stripe dashboard.
@@ -137,7 +131,13 @@ export default guard(async function handler(req, res) {
       planId: plan.id,
       discordId: uid,
       sessionId: session.id,
-      amountUsd: typeof session.amount_total === 'number' ? session.amount_total / 100 : (plan.priceUsd ?? 0),
+      // amount_total comes back in MINOR units, and the divisor is not always
+      // 100 — a ¥1500 sale reports 1500, which /100 would log as ¥15.
+      // session.currency is the currency Stripe actually charged in.
+      amountUsd: typeof session.amount_total === 'number'
+        ? fromMinor(session.amount_total, session.currency ?? plan.currency)
+        : (plan.priceUsd ?? 0),
+      currency: normalizeCurrency(session.currency ?? plan.currency),
       discountCode,
     });
   } catch (err) {

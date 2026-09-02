@@ -1,5 +1,21 @@
 const $ = (sel) => document.querySelector(sel);
-const fmtPrice = (usd) => `$${usd.toFixed(2)}`;
+// Same rule as the storefront: the amount carries its own currency, and a
+// zero-decimal one must not be printed with cents it does not have.
+let PAGE_CURRENCY = 'usd';
+const ZERO_DECIMAL = new Set(['bif', 'clp', 'djf', 'gnf', 'jpy', 'kmf', 'krw', 'mga',
+  'pyg', 'rwf', 'vnd', 'vuv', 'xaf', 'xof', 'xpf', 'isk', 'ugx']);
+const fmtPrice = (amount, cur = PAGE_CURRENCY) => {
+  const c = String(cur ?? PAGE_CURRENCY).toLowerCase();
+  const dp = ZERO_DECIMAL.has(c) ? 0 : 2;
+  try {
+    return new Intl.NumberFormat(undefined, {
+      style: 'currency', currency: c.toUpperCase(),
+      minimumFractionDigits: dp, maximumFractionDigits: dp,
+    }).format(Number(amount));
+  } catch {
+    return `${c.toUpperCase()} ${Number(amount).toFixed(dp)}`;
+  }
+};
 
 // Success is only claimed once the role has actually landed: we poll /api/me
 // until the plan's subscription shows up entitled (the webhook grants it
@@ -51,16 +67,28 @@ async function main() {
   renderAccount(me);
 
   const requested = new URLSearchParams(window.location.search).get('plan');
-  const plan = plans.find((p) => p.id === requested) ?? plans[0];
+  // No `?? plans[0]`. That named the store's FIRST product, at its price, on
+  // the receipt for whatever was actually bought whenever the bought product
+  // had since been taken off sale. Better to say less than to say wrong.
+  // A product since taken off sale is absent from /api/plans, but the buyer's
+  // own subscription row still names it — and the confirmed screen reads its
+  // roleNames, which the bare placeholder never carried (it threw instead).
+  const owned = (me.subscriptions ?? []).find((s) => s.planId === requested);
+  const plan = plans.find((p) => p.id === requested)
+    ?? (requested ? { id: requested, name: owned?.planName ?? 'Your purchase', roleNames: owned?.roleNames ?? [], lifetime: owned?.lifetime ?? false, interval: '', priceUsd: null, currency: plans[0]?.currency } : null);
   if (!plan) return;
 
   $('#r-server').textContent = server.name || '—';
   $('#r-product').textContent = plan.name;
-  $('#r-option').textContent = plan.lifetime ? 'One-time — lifetime access' : `Recurring — per ${plan.interval}`;
+  $('#r-option').textContent = plan.lifetime ? 'One-time — lifetime access' : plan.interval ? `Recurring — per ${plan.interval}` : '';
   // The charged amount (discounts applied) beats the list price the moment
   // the buyer's subscription row lands; until then the list price stands in.
   const paidFor = (m) => (m.subscriptions ?? []).find((s) => s.planId === plan.id && s.paidUsd !== null && s.paidUsd !== undefined);
-  const renderTotal = (m) => { $('#r-total').textContent = fmtPrice(paidFor(m)?.paidUsd ?? plan.priceUsd); };
+  PAGE_CURRENCY = String(plan.currency ?? PAGE_CURRENCY).toLowerCase();
+  const renderTotal = (m) => {
+    const v = paidFor(m)?.paidUsd ?? plan.priceUsd;
+    $('#r-total').textContent = v === null || v === undefined ? '—' : fmtPrice(v, plan.currency);
+  };
   renderTotal(me);
   $('#open-discord-label').textContent = server.name ? `Open ${server.name} on Discord` : 'Open Discord';
   if (server.guildId) $('#open-discord').href = `https://discord.com/channels/${server.guildId}`;

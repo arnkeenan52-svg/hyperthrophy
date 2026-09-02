@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PUB = path.join(ROOT, 'public');
 const BASE = 'https://dues.gg';
-const V = '194'; // keep in step with the ?v= asset version on index.html
+const V = '195'; // keep in step with the ?v= asset version on index.html
 // Describes the shared link-preview card (public/og-card.jpg), which is a
 // render of the homepage hero — see scripts/build-og-card.mjs.
 const OG_ALT =
@@ -256,6 +256,13 @@ const DAY_CSS = `
 :root, :root[data-theme='light'], :root[data-theme='dark'] {
   color-scheme: light;
   --bg: #f4f8fd;
+  /* iOS paints the strips behind its own bars by sampling a fixed element at
+     each viewport edge — .ui-tint and .ui-tint-b in styles.css. This page is
+     SKY at the top and PAPER below, so the two edges are different colours,
+     and the single value they used to share is what put a band of sky blue
+     under a near-white footer at the bottom of all 48 of these pages. */
+  --ui-tint: #70a3e6;
+  --ui-tint-b: #f4f8fd;
   --panel: rgba(255,255,255,.62);
   --panel-hover: rgba(255,255,255,.86);
   --edge: rgba(255,255,255,.75);
@@ -359,7 +366,7 @@ body.home .disc-hero .kicker { color: rgba(15,22,38,.72); }
 const nav = `
   <header class="top xoe-nav">
     <div class="top-left">
-      <a href="/"><img class="platform-mark" src="/dues.png?v=194" alt="Dues" height="20" /></a>
+      <a href="/"><img class="platform-mark" src="/dues.png?v=195" alt="Dues" height="20" /></a>
     </div>
     <nav class="top-center" aria-label="Main">
       <a class="nav-link" href="/discover">Discover</a>
@@ -376,13 +383,13 @@ const nav = `
 export const footerHtml = `
   <footer class="site-footer cols seo-footer">
     <div class="footer-brand">
-      <img class="powered-mark" src="/dues.png?v=194" alt="Dues" height="16" />
+      <img class="powered-mark" src="/dues.png?v=195" alt="Dues" height="16" />
       <span class="footer-copy">© Dues</span>
     </div>
     <nav class="footer-col"><span class="footer-head">Product</span>
       <a href="/discover">Discover stores</a><a href="/pricing">Plans</a><a href="/pricing">Pricing</a><a href="/help">FAQ</a>
       <a href="/help">Help</a><a href="/dashboard">Dashboard</a><a href="/account">Your account</a>
-      <a href="https://discord.gg/G6yjsX5qbB" rel="noopener">Community Discord</a></nav>
+      <a href="https://discord.gg/G6yjsX5qbB" rel="noopener">Community Discord</a><a href="mailto:contact@dues.gg">contact@dues.gg</a></nav>
     <nav class="footer-col"><span class="footer-head">Compare</span>
       <a href="/vs/whop">Dues vs Whop</a><a href="/vs/launchpass">Dues vs LaunchPass</a>
       <a href="/vs/subscord">Dues vs Subscord</a><a href="/vs/doorfee">Dues vs DoorFee</a>
@@ -439,7 +446,7 @@ function page({ urlPath, title, desc, body, jsonld = [], crumbs = [] }) {
   <meta property="og:type" content="website" />
   <meta property="og:title" content="${esc(title)}" />
   <meta property="og:description" content="${esc(desc)}" />
-  <meta property="og:image" content="${BASE}/og-card.jpg?v=194" />
+  <meta property="og:image" content="${BASE}/og-card.jpg?v=${V}" />
   <meta property="og:image:type" content="image/jpeg" />
   <meta property="og:image:width" content="1200" />
   <meta property="og:image:height" content="630" />
@@ -453,23 +460,33 @@ function page({ urlPath, title, desc, body, jsonld = [], crumbs = [] }) {
   <meta name="twitter:card" content="summary_large_image" />
   <meta name="twitter:site" content="@duesdiscord" />
   <meta name="twitter:creator" content="@duesdiscord" />
-  <meta name="twitter:image" content="${BASE}/og-card.jpg?v=194" />
+  <meta name="twitter:image" content="${BASE}/og-card.jpg?v=${V}" />
   <meta name="twitter:image:alt" content="${esc(OG_ALT)}" />
-  <!-- Icons. favicon.ico stays at a stable, UNVERSIONED url on purpose: Google
-       caches the search-result favicon by URL, and a moving ?v= resets it.
-       The .ico carries 16/32/48/64, which clears Google's "multiple of 48px"
-       floor; the 96px PNG is what it actually prefers to serve. -->
-  <link rel="icon" href="/favicon.ico" sizes="32x32" />
+  <!-- Icons, all four at STABLE urls with no ?v= on them. Google caches the
+       search-result favicon by URL and re-crawls it rarely, so a version query
+       that moves on every ship hands it a URL it has never seen instead of the
+       one it already holds. The reasoning was written here before and then
+       contradicted two lines down, which is how the one URL Google prefers —
+       the 96px PNG — ended up as the only versioned one. Vercel serves these
+       with must-revalidate, so the query bought no freshness either.
+       Sizes are what the files ARE: favicon.ico now carries 48 and 96, both
+       multiples of 48, which is what Google requires. It used to hold a single
+       16x16 and be declared as 32x32; the comment here claimed 16/32/48/64.
+       Three answers, one 449-byte file, none of them checked. Rebuild it with
+       scripts/gen-favicon-ico.mjs, which reads its own output back. -->
+  <link rel="icon" href="/favicon.ico" sizes="48x48 96x96" />
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-  <link rel="icon" type="image/png" sizes="96x96" href="/favicon-96x96.png?v=${V}" />
-  <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=${V}" />
+  <link rel="icon" type="image/png" sizes="96x96" href="/favicon-96x96.png" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
   <link rel="manifest" href="/site.webmanifest" />
   <link rel="stylesheet" href="/styles.css?v=${V}" />
   <style>${DAY_CSS}</style>
   ${ld}
-  <script src="/theme.js?v=194"></script>
+  <script src="/theme.js?v=195"></script>
 </head>
 <body class="home seo-page">
+<i class="ui-tint" aria-hidden="true"></i>
+<i class="ui-tint-b" aria-hidden="true"></i>
 ${nav}
   <main class="landing">
 ${body}
@@ -1461,7 +1478,17 @@ emit(
 const AI_BOTS = ['GPTBot', 'OAI-SearchBot', 'ChatGPT-User', 'ClaudeBot', 'Claude-Web', 'PerplexityBot', 'Google-Extended', 'CCBot'];
 emit(
   'robots.txt',
-  `User-agent: *\nAllow: /\nDisallow: /api/\nDisallow: /dashboard\nDisallow: /account\nDisallow: /receipt\n\n${AI_BOTS.map((b) => `User-agent: ${b}\nAllow: /`).join('\n\n')}\n\nSitemap: ${BASE}/sitemap.xml\n`,
+  // Anchored, because a bare prefix is a glob. "Disallow: /account" also hid
+// /accounting, /account-managers and any other seller slug that starts with
+// those letters — slugs the reserved list deliberately allows. `$` pins the
+// exact path, the trailing-slash form covers anything beneath it, and `?`
+// covers the receipt's query string.
+// /api/plans, /api/img and /api/discover are what a storefront and the
+// /discover grid render FROM — public, read-only, and the only way a crawler
+// sees a store's products, its banner, or a link to it. RFC 9309 gives the
+// longest matching rule the win, so these three escape the /api/ block and
+// nothing else under it does.
+`User-agent: *\nAllow: /\nAllow: /api/plans\nAllow: /api/img\nAllow: /api/discover\nDisallow: /api/\nDisallow: /dashboard$\nDisallow: /dashboard/\nDisallow: /dashboard?\nDisallow: /account$\nDisallow: /account/\nDisallow: /account?\nDisallow: /receipt$\nDisallow: /receipt/\nDisallow: /receipt?\n\n${AI_BOTS.map((b) => `User-agent: ${b}\nAllow: /`).join('\n\n')}\n\nSitemap: ${BASE}/sitemap.xml\n`,
 );
 
 // The landing page is hand-written, but its footer is not — it is stamped from

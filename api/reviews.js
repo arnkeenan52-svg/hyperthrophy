@@ -87,7 +87,9 @@ export default guard(async function handler(req, res) {
     }
 
     const beforeRaw = url.searchParams.get('before');
-    const before = beforeRaw && /^\d+$/.test(beforeRaw) ? Number(beforeRaw) : null;
+    // Digits are not enough: twenty of them pass the regex, overflow a bigint
+    // on Postgres, and 500 the endpoint. SQLite shrugged, so the suite never saw it.
+    const before = beforeRaw && /^\d{1,15}$/.test(beforeRaw) && Number.isSafeInteger(Number(beforeRaw)) ? Number(beforeRaw) : null;
     const rows = await db.listReviews(store.id, { limit: PAGE + 1, before });
     const page = rows.slice(0, PAGE);
     const summary = await db.reviewSummary(store.id);
@@ -116,7 +118,7 @@ export default guard(async function handler(req, res) {
       return sendJson(res, 403, { error: 'not your store' });
     }
     const id = Number(body.id);
-    if (!Number.isInteger(id) || id <= 0) return sendJson(res, 400, { error: 'which review?' });
+    if (!Number.isSafeInteger(id) || id <= 0) return sendJson(res, 400, { error: 'which review?' });
     const target = await db.getReviewById(id);
     if (!target || target.storeId !== store.id) return sendJson(res, 404, { error: 'unknown review' });
     const text = body.body === null || body.body === '' ? null : String(body.body).trim().slice(0, MAX_BODY);

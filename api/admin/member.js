@@ -48,11 +48,16 @@ export default guard(async function handler(req, res) {
     // Remove the membership: every live subscription of this member in this
     // store is canceled, then reconcile takes the managed roles away.
     case 'revoke': {
-      const subs = (await db.subscriptionsForMember(memberId)).filter(
-        (s) => storeMatches(s) && (s.status === 'active' || s.status === 'past_due'),
-      );
-      if (!subs.length) {
-        sendJson(res, 404, { error: 'No active membership for that member in this store.' });
+      const mine = (await db.subscriptionsForMember(memberId)).filter(storeMatches);
+      const subs = mine.filter((s) => s.status === 'active' || s.status === 'past_due');
+      // Nothing live, but the member HAS had a row here: the first click may
+      // have canceled the row and then lost the Discord call (a 5xx, or the
+      // paid role sitting above the bot). Answering 404 made that click the
+      // last one possible — the row was already canceled, so the button could
+      // never be retried. Reconcile anyway: it takes back whatever is still
+      // held, and is a no-op when nothing is.
+      if (!subs.length && !mine.length) {
+        sendJson(res, 404, { error: 'No membership for that member in this store.' });
         return;
       }
       for (const sub of subs) {
@@ -74,7 +79,10 @@ export default guard(async function handler(req, res) {
         discordId: memberId,
         planId: plan.id,
         provider: 'manual',
-        providerRef: `manual:${store.id ?? 'default'}:${memberId}:${now()}`,
+        // No timestamp in the ref. (provider, provider_ref) is the upsert key,
+        // so a double-click on Grant used to book the same member twice; one
+        // ref per member per plan makes the second click a no-op.
+        providerRef: `manual:${store.id ?? 'default'}:${memberId}:${plan.id}`,
         status: 'active',
         currentPeriodEnd: plan.lifetime ? null : now() + (plan.durationDays ?? 31) * 86400,
         graceUntil: null,

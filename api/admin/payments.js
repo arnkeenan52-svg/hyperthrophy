@@ -37,8 +37,13 @@ export default guard(async function handler(req, res) {
   // When a managed store has taken that guild over, attribute those legacy
   // payments to it — one server, one store, one history — while still
   // pricing them from the env catalog they were sold from.
+  // — but only for the platform operator. Those legacy rows are the
+  // platform's own early ledger, and the twin is created by whichever Discord
+  // admin of that guild runs the onboarding wizard, which is deliberately
+  // open (see the e2e scenario for the built-in server). Attributing them to
+  // any twin handed a guild moderator the platform's payment history.
   const def = defaultStore();
-  if (def && !byId.has(null)) {
+  if (def && platformAdmin && !byId.has(null)) {
     const twin = visible.find((s) => String(s.guildId) === String(def.guildId));
     if (twin) byId.set(null, twin);
   }
@@ -67,7 +72,12 @@ export default guard(async function handler(req, res) {
       storeName: store.name,
       planId: s.plan_id,
       planName: plan?.name ?? s.plan_id,
-      amountUsd: s.paid_usd !== null && s.paid_usd !== undefined ? Number(s.paid_usd) : plan?.priceUsd ?? 0,
+      // A manual grant is free by definition; the list-price fallback is for
+      // provider events that arrived without an amount, not for gifts.
+      amountUsd: s.paid_usd !== null && s.paid_usd !== undefined ? Number(s.paid_usd) : s.provider === 'manual' ? 0 : plan?.priceUsd ?? 0,
+      // The currency THIS sale happened in, off the row itself — not the
+      // store's current one. History does not get re-denominated.
+      currency: s.currency ?? store.currency ?? 'usd',
       provider: s.provider,
       status: s.status,
       entitled: isEntitled(s),
@@ -99,6 +109,7 @@ export default guard(async function handler(req, res) {
       planId: a.plan_id,
       planName: catalog.find((p) => p.id === a.plan_id)?.name ?? a.plan_id,
       amountUsd: Number(a.amount_usd ?? 0),
+      currency: a.currency ?? store.currency ?? 'usd',
       discountCode: a.discount_code ?? null,
       status: a.status,
       sessionId: a.session_id,
@@ -119,7 +130,10 @@ export default guard(async function handler(req, res) {
         id: s.id, slug: s.slug, name: s.name, status: s.status, guildId: s.guildId, isDefault: s.isDefault,
         // whether a key EXISTS — never the key, and never anything derived
         // from it. The setup checklist used to hard-code this as true.
-        hasStripeKey: Boolean(s.hasOwnStripeKey),
+        // A sealed key that no longer opens (rotated SESSION_SECRET) is not a
+        // connected one: the checklist must go red, not hide itself.
+        hasStripeKey: Boolean(s.hasOwnStripeKey) && !s.stripeKeyBroken,
+        stripeKeyBroken: Boolean(s.stripeKeyBroken),
         notifyChannelId: s.notifyChannelId ?? null, theme: s.theme ?? null,
         discoverable: Boolean(s.discoverable), category: s.category ?? null,
         description: s.description ?? null,
@@ -135,6 +149,16 @@ export default guard(async function handler(req, res) {
         creatorName: s.creatorName ?? null,
         team: s.team ?? null,
         teamHeading: s.teamHeading ?? null,
+        // What this store prices in. Every money figure the dashboard draws is
+        // denominated in it, so it has to arrive with the payload rather than
+        // be assumed.
+        currency: s.currency ?? 'usd',
+        // The crypto payout wallet, in full. It is a PUBLIC address — the
+        // thing a buyer would send to — not a secret, and the settings form
+        // has to be able to show the seller what is currently saved. What is
+        // never sent anywhere is the private key, which Dues has never had.
+        cryptoWallet: s.cryptoWallet ?? null,
+        cryptoChain: s.cryptoChain ?? null,
         // The seller's own rating, and the real one: this is the same COUNT
         // and mean the storefront draws, reported even while the switch is
         // off, because turning the display off must not blind the seller to
@@ -157,7 +181,22 @@ export default guard(async function handler(req, res) {
     // saved value comes back looking blank and the next save wipes it.
     stores: storeRows,
     totals: {
+      // One number per currency, never one number across them. An owner with a
+      // USD store and a DKK store used to get their sum presented as dollars.
+      byCurrency: rows.reduce((acc, r) => {
+        const c = r.currency ?? 'usd';
+        acc[c] = Math.round(((acc[c] ?? 0) + r.amountUsd) * 100) / 100;
+        return acc;
+      }, {}),
+      // Kept for the headline figure, and only meaningful when the rows share
+      // one currency — `currency` below says whether they do.
       allTimeUsd: Math.round(rows.reduce((sum, r) => sum + r.amountUsd, 0) * 100) / 100,
+      // The single currency every row is in, or null when they differ. The
+      // dashboard refuses to print a total it cannot name.
+      currency: (() => {
+        const all = new Set(rows.map((r) => r.currency ?? 'usd'));
+        return all.size === 1 ? [...all][0] : null;
+      })(),
       payments: rows.length,
       activeMembers: activeMembers.size,
       lifetimeMembers: new Set(rows.filter((r) => r.lifetime).map((r) => r.discordId)).size,

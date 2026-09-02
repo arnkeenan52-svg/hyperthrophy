@@ -19,6 +19,7 @@ import {
 } from '../lib/stripe.js';
 import { getAppSecret, setAppSecret, acquireLock, releaseLock } from '../db.js';
 import { resendApiKey, receiptFrom } from '../lib/email.js';
+import { toMinor, fromMinor, formatAmount, normalize as normalizeCurrency } from '../lib/currency.js';
 
 const MANAGE_ROLES = 1n << 28n;
 const ADMINISTRATOR = 1n << 3n;
@@ -168,16 +169,22 @@ export async function runDoctor() {
         continue;
       }
       const price = await res.json();
-      const expected = Math.round(plan.priceUsd * 100);
-      // plans.json prices are USD by definition (priceUsd). The Stripe
-      // account's default currency is irrelevant — the price object's own
-      // currency is what buyers get charged in, so any mismatch here means
-      // the wrong money would be taken. Fail loudly, never silently pass.
+      // The plan's own currency, which for plans.json is USD and for a
+      // database store is whatever that store prices in. Comparing in MINOR
+      // units means the expected figure has to be built with the same
+      // per-currency factor the charge will use, or a ¥ plan would be checked
+      // against a hundredfold-wrong number and "pass".
+      const want = normalizeCurrency(plan.currency);
+      const expected = toMinor(plan.priceUsd, want);
+      // The Stripe account's default currency is irrelevant — the price
+      // object's own currency is what buyers get charged in, so any mismatch
+      // here means the wrong money would be taken. Fail loudly, never
+      // silently pass.
       const currency = String(price.currency ?? '').toLowerCase();
-      if (currency !== 'usd') {
+      if (currency !== want) {
         add(id, name, 'fail',
-          `CURRENCY MISMATCH: plans.json prices are USD but price ${plan.stripePriceId} is ${currency.toUpperCase() || 'unknown'} — buyers would be charged in the wrong currency`,
-          `Create the price in USD (Stripe dashboard → Product catalog → the product → Add another price → currency USD, $${plan.priceUsd}, ${plan.lifetime ? 'One-off' : 'Recurring'}) and put its id in plans.json. Do not rely on the account's default currency.`);
+          `CURRENCY MISMATCH: this plan is priced in ${want.toUpperCase()} but price ${plan.stripePriceId} is ${currency.toUpperCase() || 'unknown'} — buyers would be charged in the wrong currency`,
+          `Create the price in ${want.toUpperCase()} (Stripe dashboard → Product catalog → the product → Add another price → currency ${want.toUpperCase()}, ${formatAmount(plan.priceUsd, want)}, ${plan.lifetime ? 'One-off' : 'Recurring'}) and put its id in plans.json. Do not rely on the account's default currency.`);
       } else if (price.active !== true) {
         add(id, name, 'fail', `price ${plan.stripePriceId} is archived (active=false)`,
           'Unarchive it or create a new price: Stripe dashboard → Product catalog → the product → Pricing.');
@@ -188,10 +195,10 @@ export async function runDoctor() {
         add(id, name, 'fail', `price ${plan.stripePriceId} is one-time but plan "${plan.id}" is a recurring ${plan.interval} plan`,
           `Create a Recurring (${plan.interval}) price in Stripe → Product catalog and put its id in plans.json.`);
       } else if (price.unit_amount !== expected) {
-        add(id, name, 'fail', `price is ${(price.unit_amount / 100).toFixed(2)} USD but plans.json says $${plan.priceUsd}`,
+        add(id, name, 'fail', `price is ${formatAmount(fromMinor(price.unit_amount, want), want)} but this plan says ${formatAmount(plan.priceUsd, want)}`,
           `Fix whichever is wrong: the price in Stripe → Product catalog, or priceUsd in plans.json.`);
       } else {
-        add(id, name, 'pass', `${plan.stripePriceId}: $${(price.unit_amount / 100).toFixed(2)} USD ${price.type === 'one_time' ? 'one-time' : `every ${price.recurring?.interval}`}, active`);
+        add(id, name, 'pass', `${plan.stripePriceId}: ${formatAmount(fromMinor(price.unit_amount, want), want)} ${want.toUpperCase()} ${price.type === 'one_time' ? 'one-time' : `every ${price.recurring?.interval}`}, active`);
       }
     } catch (err) {
       add(id, name, 'fail', `could not reach Stripe: ${err.message}`);
@@ -400,6 +407,113 @@ export async function runDoctor() {
       'Set both to enable crypto, or clear both for Stripe-only (the CTA hides automatically).');
   } else {
     add('coinbase:partial', 'Coinbase capability', 'pass', capabilities().crypto ? 'crypto enabled' : 'Stripe-only (coinbase dormant)');
+  }
+
+  // ── NOWPayments: the crypto rail ────────────────────────────────────────────
+  //
+  // Checked LIVE, for the same reason the Stripe section is: the difference
+  // between "the code is written" and "a buyer can pay in crypto and the seller
+  // receives it" is four external preconditions, and none of them live in this
+  // repository. Asserting readiness from the presence of code is how a rail
+  // gets called live while every payment settles somewhere nobody intended.
+  const np = config.nowpayments;
+  if (!np.apiKey && !np.ipnSecret) {
+    add('nowpayments:off', 'NOWPayments capability', 'skip',
+      'NOWPAYMENTS_API_KEY and NOWPAYMENTS_IPN_SECRET are both unset — the crypto rail is dormant, its endpoints answer 501 and the storefront hides the option.');
+  } else if (np.apiKey && np.ipnSecret && !capabilities().nowpayments) {
+    // Both credentials present and the rail still off: that is the release
+    // gate doing its job, not a misconfiguration, and the doctor has to say so
+    // or the next person reads "off" and goes looking for a missing variable.
+    add('nowpayments:held', 'NOWPayments rail is release-gated', 'skip',
+      'NOWPAYMENTS_API_KEY and NOWPAYMENTS_IPN_SECRET are set; NOWPAYMENTS_RELEASED is not 1, so the rail stays dormant — endpoints answer 501, the storefront hides the option.',
+      'Leave it. The 29 Aug 2026 audit confirmed 29 defects in this rail (3 critical); it is released by setting NOWPAYMENTS_RELEASED=1 only after every one is closed and re-verified.');
+  } else if (!np.apiKey || !np.ipnSecret) {
+    // Half-configured is the dangerous state: with a key but no secret, the
+    // checkout would create real payments the webhook can never verify.
+    add('nowpayments:partial', 'NOWPayments configured fully or not at all', 'fail',
+      `only one of NOWPAYMENTS_API_KEY / NOWPAYMENTS_IPN_SECRET is set (${mask(np.apiKey)} / ${mask(np.ipnSecret)})`,
+      'Set both, or clear both. The IPN secret is generated in the NOWPayments dashboard under Settings → IPN and is shown ONCE — with a key but no secret, buyers could start real payments that no delivery can be verified against, and no role would ever be granted.');
+  } else {
+    // 1. Is the provider reachable at all, and does the key work?
+    try {
+      const res = await fetch(`${np.apiBase}/merchant/coins`, {
+        headers: { 'x-api-key': np.apiKey },
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (res.status === 401 || res.status === 403) {
+        add('nowpayments:key', 'NOWPayments API key accepted', 'fail', `the provider rejected the key (${res.status})`,
+          'Check NOWPAYMENTS_API_KEY against the key in the NOWPayments dashboard → Settings → API keys.');
+      } else if (!res.ok) {
+        add('nowpayments:key', 'NOWPayments reachable', 'warn', `GET /merchant/coins answered ${res.status}`,
+          'Transient provider errors are normal; a persistent non-200 means checkout will fail to list coins.');
+      } else {
+        const body = await res.json().catch(() => ({}));
+        const coins = (body?.selectedCurrencies ?? body?.currencies ?? []).map((c) => String(c).toLowerCase());
+        if (!coins.length) {
+          add('nowpayments:coins', 'At least one coin is enabled', 'fail', 'the merchant account has no coins enabled',
+            'Enable the coins you want to accept in the NOWPayments dashboard → Coins. With none enabled the coin picker is empty and no crypto payment can be created.');
+        } else {
+          add('nowpayments:coins', 'NOWPayments key works and coins are enabled', 'pass',
+            `${coins.length} coin(s) enabled: ${coins.slice(0, 8).join(', ')}${coins.length > 8 ? '…' : ''}`);
+        }
+      }
+    } catch (err) {
+      add('nowpayments:key', 'NOWPayments reachable', 'warn', err.message,
+        'Could not reach the provider from here. If this persists, crypto checkout will fail to start.');
+    }
+
+    // 2. The callback the provider will be told to hit on every payment. There
+    //    is no IPN URL field in their dashboard, so this string IS the config.
+    const ipnUrl = `${config.publicBaseUrl.replace(/\/$/, '')}/api/webhooks/nowpayments`;
+    if (!ipnUrl.startsWith('https://')) {
+      add('nowpayments:ipn-url', 'IPN callback URL is https', 'fail', ipnUrl,
+        'NOWPayments will not call a non-https callback. Fix PUBLIC_BASE_URL — every payment carries this URL and without it no payment is ever reported.');
+    } else {
+      add('nowpayments:ipn-url', 'IPN callback URL', 'pass', `${ipnUrl} (sent on every payment; there is no dashboard field for it)`);
+    }
+  }
+
+  // 3. Payout wallets. This is the custody guarantee, and it is per store: a
+  //    payment created without one settles into the platform balance, which is
+  //    the single thing this architecture exists to prevent.
+  if (capabilities().nowpayments) {
+    try {
+      const { allStores } = await import('../db.js');
+      const rows = await allStores();
+      const live = rows.filter((r) => r.status === 'live');
+      const withWallet = live.filter((r) => String(r.crypto_wallet ?? '').trim());
+      if (!live.length) {
+        add('nowpayments:wallets', 'Seller payout wallets', 'skip', 'no live stores yet');
+      } else if (!withWallet.length) {
+        add('nowpayments:wallets', 'Seller payout wallets', 'warn',
+          `0 of ${live.length} live store(s) have set a crypto payout wallet`,
+          'Crypto stays hidden on those storefronts until a seller sets one under Settings → Crypto payouts. Checkout refuses to create a payment without it, so nothing can settle into the platform balance — but no store can take crypto either.');
+      } else {
+        add('nowpayments:wallets', 'Seller payout wallets', 'pass',
+          `${withWallet.length} of ${live.length} live store(s) can take crypto`);
+      }
+    } catch (err) {
+      add('nowpayments:wallets', 'Seller payout wallets', 'warn', err.message);
+    }
+
+    // 4. The one precondition no API exposes. Stated as a check rather than
+    //    left in a commit message, because it is the difference between
+    //    forwarding and holding, and it can only be read off the dashboard.
+    add('nowpayments:custody', 'Custody switched OFF on the merchant account', 'warn',
+      'cannot be read through the API — verify by hand in the NOWPayments dashboard',
+      'Target state is Custody OFF. Until then every payment relies on the per-payment payout_address to forward, which this code always sends and refuses to omit. Turning custody off requires a payout wallet on the account first.');
+  }
+
+  // Storage. Twenty checks and not one of them asked whether the database
+  // answers; a deployment with no Postgres reported ok:true while every
+  // request that touched a row failed. One read settles it.
+  try {
+    await getAppSecret('doctor:storage-probe');
+    add('storage', 'Database answers', config.databaseUrl ? 'pass' : 'warn',
+      config.databaseUrl ? 'postgres' : 'sqlite — a local file, fine on a laptop, not on Vercel',
+      config.databaseUrl ? null : 'Set DATABASE_URL to a Postgres you can reach and run `npm run migrate`.');
+  } catch (err) {
+    add('storage', 'Database answers', 'fail', err.message, 'Set DATABASE_URL to a reachable Postgres and run `npm run migrate`.');
   }
 
   return {

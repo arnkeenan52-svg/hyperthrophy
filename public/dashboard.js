@@ -7,7 +7,32 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 // Discord roles display as @Name exactly once — a role literally named
 // "@PREMIUM" must not render as "@@PREMIUM". Stored names stay verbatim.
 const roleLabel = (r) => `@${String(r ?? '').replace(/^@+/, '')}`;
-const usd = (n) => `$${Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+// Every seller-money figure on this dashboard is denominated in the SELECTED
+// STORE's currency, set from the payload the moment a store is chosen. Dues's
+// own money — the platform-admin volume and MRR — is always USD and passes it
+// explicitly, because the two must never borrow each other's symbol.
+let STORE_CURRENCY = 'usd';
+const ZERO_DECIMAL = new Set(['bif', 'clp', 'djf', 'gnf', 'jpy', 'kmf', 'krw', 'mga',
+  'pyg', 'rwf', 'vnd', 'vuv', 'xaf', 'xof', 'xpf', 'isk', 'ugx']);
+const curDp = (c) => (ZERO_DECIMAL.has(String(c ?? '').toLowerCase()) ? 0 : 2);
+const usd = (n, cur = STORE_CURRENCY) => {
+  const c = String(cur ?? STORE_CURRENCY).toLowerCase();
+  const dp = curDp(c);
+  try {
+    return new Intl.NumberFormat(undefined, {
+      style: 'currency', currency: c.toUpperCase(),
+      minimumFractionDigits: dp, maximumFractionDigits: dp,
+    }).format(Number(n));
+  } catch {
+    return `${c.toUpperCase()} ${Number(n).toLocaleString(undefined, { minimumFractionDigits: dp, maximumFractionDigits: dp })}`;
+  }
+};
+// Aggregates can span currencies: a sale can settle in the buyer's own
+// currency and a manual grant carries the column default, so a sum across
+// rows is a number in no currency at all. One figure per currency.
+const byCur = (list) => { const m = new Map(); for (const p of list) { const c = String(p.currency ?? STORE_CURRENCY).toLowerCase(); m.set(c, (m.get(c) ?? 0) + p.amountUsd); } return m; };
+const money = (list) => { const e = [...byCur(list)].sort((a, b) => b[1] - a[1]); return e.length ? e.map(([c, v]) => usd(v, c)).join(' + ') : usd(0); };
+const oneCur = (list) => byCur(list).size <= 1;
 const fmtDT = (unix) =>
   new Date(unix * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) +
   ', ' + new Date(unix * 1000).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
@@ -105,7 +130,12 @@ async function api(path, body) {
     body: JSON.stringify(body),
   });
   const out = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(out.detail ?? out.error ?? 'That did not work. Try again.');
+  if (!res.ok) {
+    const err = new Error(out.detail ?? out.error ?? 'That did not work. Try again.');
+    err.status = res.status;
+    err.body = out; // a 409 can carry a needsConfirm payload the caller acts on
+    throw err;
+  }
   return out;
 }
 
@@ -127,7 +157,14 @@ function renderNav() {
     $('#login').onclick = () => (window.location.href = '/auth/login');
     return;
   }
-  el.innerHTML = `<a class="nav-link" href="/account">Account</a><span>@${esc(me.username ?? me.discordId)}</span><button class="btn-ghost" id="logout">Sign out</button>`;
+  // `??` falls through on null and undefined only, so an account whose username
+  // is an empty string rendered a lone "@" in the header — a stray glyph at the
+  // same size and weight as the two real nav links, sitting between them and
+  // meaning nothing. Emit the handle only when there is one.
+  const handle = String(me.username ?? '').trim() || String(me.discordId ?? '').trim();
+  el.innerHTML = `<a class="nav-link" href="/account">Account</a>`
+    + (handle ? `<span class="nav-user">@${esc(handle)}</span>` : '')
+    + `<button class="btn-ghost" id="logout">Sign out</button>`;
   $('#logout').onclick = () => (window.location.href = '/auth/logout');
 }
 
@@ -252,21 +289,21 @@ async function viewAdmin() {
 
   const storeRow = (st) => `<tr>
       <td><a class="admin-store-link" href="#/store/${esc(st.slug)}">${esc(st.name)}</a><span class="dim"> /${esc(st.slug)}</span></td>
-      <td>${st.ownerUsername ? '@' + esc(st.ownerUsername) : ''}<span class="dim"> ${esc(st.ownerDiscordId ?? '')}</span></td>
+      <td>${st.ownerUsername ? `@${esc(st.ownerUsername)}<span class="dim"> ${esc(st.ownerDiscordId ?? '')}</span>` : esc(st.ownerDiscordId ?? '')}</td>
       <td>${st.status === 'live' ? '<span class="chip chip-good">Live</span>' : '<span class="chip chip-off">Draft</span>'}</td>
       <td>${esc(st.ownerTier)}</td>
       <td class="num">${st.members}</td>
-      <td class="num">${usd(st.revenueUsd)}</td>
+      <td class="num">${usd(st.revenueUsd, 'usd')}</td>
       <td class="dim">${st.createdAt ? fmtDT(st.createdAt) : '—'}</td>
     </tr>`;
 
   const userRow = (u) => `<tr>
-      <td>${u.username ? '@' + esc(u.username) : ''}<span class="dim"> ${esc(u.discordId)}</span></td>
+      <td>${u.username ? `@${esc(u.username)}<span class="dim"> ${esc(u.discordId)}</span>` : esc(u.discordId)}</td>
       <td>${u.seller ? '<span class="chip chip-code">Seller</span>' : ''}${
         u.entitled ? ' <span class="chip chip-good">Member</span>' : u.memberships ? ' <span class="chip chip-off">Lapsed</span>' : ''
       }</td>
       <td class="num">${u.memberships || ''}</td>
-      <td class="num">${u.spentUsd ? usd(u.spentUsd) : ''}</td>
+      <td class="num">${u.spentUsd ? usd(u.spentUsd, 'usd') : ''}</td>
       <td class="dim">${fmtDT(u.joinedAt)}</td>
       <td class="dim">${rel(u.lastSeenAt)}</td>
     </tr>`;
@@ -283,14 +320,14 @@ async function viewAdmin() {
         <div class="ck-stat"><span class="ck-num">${t.users}</span><span class="ck-lab">Signed-in accounts</span></div>
         <div class="ck-stat"><span class="ck-num">${t.storesLive}<span class="ck-sub">${t.storesDraft ? ` +${t.storesDraft} draft` : ''}</span></span><span class="ck-lab">Stores set up</span></div>
         <div class="ck-stat"><span class="ck-num ck-good">${t.activeMembers}</span><span class="ck-lab">Active members</span></div>
-        <div class="ck-stat"><span class="ck-num ck-good">${usd(t.allTimeUsd)}</span><span class="ck-lab">All-time volume</span></div>
+        <div class="ck-stat"><span class="ck-num ck-good">${usd(t.allTimeUsd, 'usd')}</span><span class="ck-lab">All-time volume</span></div>
         <div class="ck-stat"><span class="ck-num">${t.checkoutsStarted}<span class="ck-sub"> ${conv} paid</span></span><span class="ck-lab">Checkouts started</span></div>
-        <div class="ck-stat"><span class="ck-num ck-good">${usd(t.mrrUsd)}<span class="ck-sub">${t.payingOwners ? ` ${t.payingOwners} paying` : ''}</span></span><span class="ck-lab">Dues MRR</span></div>
+        <div class="ck-stat"><span class="ck-num ck-good">${usd(t.mrrUsd, 'usd')}<span class="ck-sub">${t.payingOwners ? ` ${t.payingOwners} paying` : ''}</span></span><span class="ck-lab">Dues MRR</span></div>
       </div>
 
       <section class="panel table-panel">
         <div class="card-head"><div><h3>Stores</h3><p class="card-sub">Everyone who set up the bot — live and still in setup.</p></div></div>
-        <div class="table-scroll"><table class="data-table t-pay"><thead><tr>
+        <div class="table-scroll" tabindex="0" role="region" aria-label="Table, scrolls sideways"><table class="data-table t-pay"><thead><tr>
           <th>Store</th><th>Owner</th><th>Status</th><th>Plan</th><th class="num">Members</th><th class="num">Revenue</th><th>Created</th>
         </tr></thead><tbody>${d.stores.map(storeRow).join('') || '<tr><td colspan="7" class="dim">No stores yet.</td></tr>'}</tbody></table></div>
         <p class="rows-note">${d.stores.length} store(s) · ${t.sellers} seller(s)</p>
@@ -304,7 +341,7 @@ async function viewAdmin() {
             <option value="">Everyone</option><option value="seller">Sellers</option><option value="member">Active members</option>
           </select>
         </div>
-        <div class="table-scroll"><table class="data-table t-pay"><thead><tr>
+        <div class="table-scroll" tabindex="0" role="region" aria-label="Table, scrolls sideways"><table class="data-table t-pay"><thead><tr>
           <th>User</th><th>Roles</th><th class="num">Purchases</th><th class="num">Spent</th><th>First seen</th><th>Last seen</th>
         </tr></thead><tbody id="au-body">${d.users.map(userRow).join('')}</tbody></table></div>
         <p class="rows-note" id="au-count">${d.users.length} account(s)</p>
@@ -532,6 +569,9 @@ function renderSetupStep(g, step) {
       </label>
       <div class="field-row">
         <label class="field">
+          <!-- USD by name here on purpose: this runs while the store is being
+               created, and a new store starts in USD. Settings is where it
+               changes, and every price field after that follows it. -->
           <span class="field-label">Price (USD) <span aria-hidden="true">*</span></span>
           <input id="f-price" type="text" inputmode="decimal" placeholder="59.99" autocomplete="off" />
           <span class="field-err" id="err-price" role="alert"></span>
@@ -778,7 +818,9 @@ function rangeWindows(range, payments) {
   if (range === 'today') {
     const start = new Date();
     start.setHours(0, 0, 0, 0);
-    return { cur: [start.getTime(), nowMs], prev: [start.getTime() - day, start.getTime()], cmp: 'yesterday (same time)', grain: 'hour' };
+    // The previous window stops at this hour yesterday, so the label is true
+    // and a partial day is not held against a whole one.
+    return { cur: [start.getTime(), nowMs], prev: [start.getTime() - day, nowMs - day], cmp: 'yesterday (same time)', grain: 'hour' };
   }
   if (range === '12m') {
     const start = new Date();
@@ -820,7 +862,10 @@ function bucketSeries(payments, win, valueOf = (p) => p.amountUsd) {
     const d = new Date(cur[0]);
     d.setDate(1); d.setHours(0, 0, 0, 0);
     const stop = new Date(cur[1]);
-    while (d <= stop && marks.length < 24) {
+    // No 24-month cap: that was a column-width guard from the bar-chart era,
+    // and it silently dropped a store's most recent year from the "All" line
+    // while the header printed the full total. The bound is only a loop guard.
+    while (d <= stop && marks.length < 600) {
       marks.push(d.getTime());
       d.setMonth(d.getMonth() + 1);
     }
@@ -871,8 +916,15 @@ function niceCeil(v) {
 // area beneath it, the previous period as a dashed muted line on the same
 // scale, hairline gridlines with clean tick labels. Hover (wired after
 // render) adds a crosshair, a dot on each line and a two-period tooltip.
+// One geometry, read by both the renderer and the hover handler. They used to
+// declare these five independently — revenueChart at its top, wireChartHover
+// again ~96 lines later — and a drift between the two copies does not throw
+// and does not look broken: it puts every crosshair and dot at a fixed offset
+// from the line it is supposed to be tracking.
+const CHART = { W: 920, H: 190, padL: 44, padB: 20, padT: 8 };
+
 function revenueChart(series) {
-  const W = 920, H = 190, padL = 44, padB = 20, padT = 8;
+  const { W, H, padL, padB, padT } = CHART;
   const { curVals, prevVals, labels } = series;
   const n = curVals.length || 1;
   const plotW = W - padL - 6, plotH = H - padB - padT;
@@ -881,7 +933,14 @@ function revenueChart(series) {
   const y = (v) => padT + plotH - (v / max) * plotH;
   const band = plotW / n;
   const x = (i) => padL + i * band + band / 2;
-  const money = (v) => (max >= 1000 ? `$${(v / 1000).toFixed(v % 1000 === 0 ? 0 : 1)}k` : `$${v}`);
+  // Axis ticks: compact, and in the store's currency rather than a bare $.
+  const sym = (() => {
+    try {
+      return new Intl.NumberFormat(undefined, { style: 'currency', currency: STORE_CURRENCY.toUpperCase(),
+        minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(0).replace(/[\d\s.,]/g, '');
+    } catch { return ''; }
+  })();
+  const money = (v) => (max >= 1000 ? `${sym}${(v / 1000).toFixed(v % 1000 === 0 ? 0 : 1)}k` : `${sym}${v}`);
   const base = padT + plotH;
 
   // Three quiet horizontals: a solid baseline and two dashed guides — the
@@ -890,9 +949,23 @@ function revenueChart(series) {
     .map((f) => {
       const gy = y(max * f);
       const baselineRow = f === 0;
-      return `<line x1="${padL}" y1="${gy.toFixed(1)}" x2="${W - 6}" y2="${gy.toFixed(1)}" stroke="var(--edge)" stroke-width="1"${baselineRow ? '' : ' stroke-dasharray="3 5" opacity="0.6"'} />
-        <text x="${padL - 8}" y="${(gy + 3.5).toFixed(1)}" text-anchor="end" class="tick">${money(max * f)}</text>`;
+      return `<line x1="${padL}" y1="${gy.toFixed(1)}" x2="${W - 6}" y2="${gy.toFixed(1)}" stroke="var(--edge)" stroke-width="1"${baselineRow ? '' : ' stroke-dasharray="3 5" opacity="0.6"'} />`;
     })
+    .join('');
+  // The axis labels are HTML, not SVG <text>, and this is the whole reason.
+  // The viewBox is 920 units wide and the chart renders at the container's
+  // width, so everything inside is scaled by (rendered / 920). A label
+  // declared at 10.5px therefore rendered at 2.9px on a 360px phone and 8.1px
+  // on a 1440px desktop — it never once appeared at its declared size, and no
+  // amount of raising that number fixes the ratio.
+  //
+  // Positions are percentages computed from the SAME geometry the line uses,
+  // because padL is 4.8% of the viewBox: a naive flex row or a plain
+  // i/(n-1) spread misregisters every label against the gridline it annotates.
+  const pctX = (i) => `${((x(i) / W) * 100).toFixed(3)}%`;
+  const pctY = (v) => `${((y(v) / H) * 100).toFixed(3)}%`;
+  const yLabels = [0, 0.5, 1]
+    .map((f) => `<span style="top:${pctY(max * f)}">${esc(money(max * f))}</span>`)
     .join('');
 
   const curPts = curVals.map((v, i) => [x(i), y(v)]);
@@ -923,28 +996,43 @@ function revenueChart(series) {
   const peakY = y(curVals[peak]) - 8;
   const peakLabel =
     curVals[peak] > 0 && peakY >= padT + 9
-      ? `<circle cx="${x(peak).toFixed(1)}" cy="${y(curVals[peak]).toFixed(1)}" r="3" fill="var(--accent)" />
-         <text x="${x(peak).toFixed(1)}" y="${peakY.toFixed(1)}" text-anchor="middle" class="peak">${usd(curVals[peak])}</text>`
+      ? `<circle cx="${x(peak).toFixed(1)}" cy="${y(curVals[peak]).toFixed(1)}" r="3" fill="var(--accent)" />`
+      : '';
+  const peakHtml =
+    curVals[peak] > 0 && peakY >= padT + 9
+      ? `<b class="rev-peak" style="left:${pctX(peak)};top:${pctY(curVals[peak])}">${esc(usd(curVals[peak]))}</b>`
       : '';
 
-  const xt = [0, Math.floor((n - 1) / 4), Math.floor((n - 1) / 2), Math.floor((3 * (n - 1)) / 4), n - 1].filter(
-    (v, i, a) => a.indexOf(v) === i,
-  );
+  // Five dates fit a desktop chart and collide on a phone, so a narrow one
+  // gets the two that carry the range: first and last.
+  const narrow = typeof window !== 'undefined' && window.innerWidth < 640;
+  const xt = (narrow
+    ? [0, n - 1]
+    : [0, Math.floor((n - 1) / 4), Math.floor((n - 1) / 2), Math.floor((3 * (n - 1)) / 4), n - 1]
+  ).filter((v, i, a) => a.indexOf(v) === i);
   const xLabels = xt
-    .map((i) => `<text x="${x(i).toFixed(1)}" y="${H - 5}" text-anchor="middle" class="tick">${esc(labels[i] ?? '')}</text>`)
+    .map((i) => `<span style="left:${pctX(i)}">${esc(labels[i] ?? '')}</span>`)
     .join('');
 
-  return `<svg class="rev-chart" viewBox="0 0 ${W} ${H}" data-max="${max}" role="img" aria-label="Revenue over time with previous-period comparison">
+  // A positioning context that is exactly the SVG's box. .chart-card is also
+  // position:relative but it contains the card header too, so percentages
+  // measured against it would be offset by the header's height.
+  return `<div class="rev-wrap">
+  <svg class="rev-chart" viewBox="0 0 ${W} ${H}" data-max="${max}" role="img" aria-label="Revenue over time with previous-period comparison">
     <defs><linearGradient id="rev-fade" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" style="stop-color:var(--accent);stop-opacity:0.2" />
       <stop offset="0.55" style="stop-color:var(--accent);stop-opacity:0.06" />
       <stop offset="1" style="stop-color:var(--accent);stop-opacity:0" />
     </linearGradient></defs>
-    ${grid}${area}${prevLine}${line}${endDot}${peakLabel}${xLabels}
+    ${grid}${area}${prevLine}${line}${endDot}${peakLabel}
     <line class="xhairline" x1="0" y1="${padT}" x2="0" y2="${base}" stroke="var(--ink)" stroke-width="1" opacity="0" />
     <circle class="dot-prev" r="3" fill="var(--dim)" opacity="0" />
     <circle class="dot-cur" r="4" fill="var(--accent)" stroke="var(--panel)" stroke-width="1.5" opacity="0" />
-  </svg>`;
+  </svg>
+  <div class="rev-y" aria-hidden="true">${yLabels}</div>
+  <div class="rev-x" aria-hidden="true">${xLabels}</div>
+  ${peakHtml}
+  </div>`;
 }
 
 // Crosshair, a dot riding each line, and one tooltip reading BOTH series at
@@ -961,7 +1049,7 @@ function wireChartHover(card, series) {
   const dotPrev = svg.querySelector('.dot-prev');
   const { curVals, prevVals, labels } = series;
   const n = curVals.length;
-  const padL = 44, W = 920, H = 190, padT = 8, padB = 20;
+  const { W, H, padL, padB, padT } = CHART;
   const plotH = H - padB - padT;
   const max = Number(svg.dataset.max) || 1;
   const yFor = (v) => padT + plotH - (v / max) * plotH;
@@ -1045,9 +1133,9 @@ function paymentsRows(list) {
   return list
     .map(
       (p) => `<tr>
-        <td>${p.username ? '@' + esc(p.username) : ''}<span class="dim"> ${esc(p.discordId)}</span></td>
+        <td>${p.username ? `@${esc(p.username)}<span class="dim"> ${esc(p.discordId)}</span>` : esc(p.discordId)}</td>
         <td>${esc(p.planName)}<span class="row-when">${fmtDT(p.createdAt)}</span></td>
-        <td class="num">${usd(p.amountUsd)}</td>
+        <td class="num">${usd(p.amountUsd, p.currency)}</td>
         <td>${chipFor(p)}</td>
         <td class="dim">${fmtDT(p.createdAt)}</td>
       </tr>`,
@@ -1072,11 +1160,11 @@ function checkoutRows(list) {
   return list
     .map(
       (c) => `<tr>
-        <td>${c.username ? '@' + esc(c.username) : ''}<span class="dim"> ${esc(c.discordId)}</span></td>
+        <td>${c.username ? `@${esc(c.username)}<span class="dim"> ${esc(c.discordId)}</span>` : esc(c.discordId)}</td>
         <td>${esc(c.planName)}${c.discountCode ? ` <span class="chip chip-code">${esc(c.discountCode)}</span>` : ''}<span class="row-when">${fmtDT(c.createdAt)}${
           c.completedAt ? ` · paid in ${fmtDur(c.completedAt - c.createdAt)}` : ''
         }</span></td>
-        <td class="num">${usd(c.amountUsd)}</td>
+        <td class="num">${usd(c.amountUsd, c.currency)}</td>
         <td>${
           c.status === 'completed'
             ? '<span class="chip chip-good">Paid</span>'
@@ -1107,12 +1195,30 @@ const SECTIONS = [
   ['settings', 'Settings', 'gear'],
 ];
 
+// Sets the dark ground, and keeps the browser-chrome colour with it. Chrome
+// on Android paints its bar from <meta name="theme-color">, which is a static
+// navy in the markup — theme.js only re-syncs it from the BODY background, and
+// on this page the body is transparent, so its sync silently no-ops here.
+function applyDarkFace(face) {
+  const root = document.documentElement;
+  if (face === 'black') root.dataset.dark = 'black';
+  else delete root.dataset.dark;
+  try {
+    const tint = getComputedStyle(root).getPropertyValue('--ui-tint').trim();
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta && tint) meta.setAttribute('content', tint);
+  } catch { /* nothing here is worth breaking a render over */ }
+}
+
 function sectionOverview(data, store, slug) {
   const win = rangeWindows(state.range, data.payments);
   const inRange = data.payments.filter((p) => inWin(p, win.cur));
   const prevRange = win.prev ? data.payments.filter((p) => inWin(p, win.prev)) : null;
   const sum = (l) => l.reduce((s, p) => s + p.amountUsd, 0);
   const pct = (cur, prev) => (prevRange === null || prev <= 0 ? null : ((cur - prev) / prev) * 100);
+  // Deltas and percentages only mean something when every row shares one
+  // currency; otherwise the cards print one figure per currency and no %.
+  const mono = oneCur(data.payments);
 
   const rev = sum(inRange);
   const revPrev = prevRange ? sum(prevRange) : 0;
@@ -1131,8 +1237,9 @@ function sectionOverview(data, store, slug) {
   const newMembersPrev = prevRange ? newIn(win.prev) : 0;
 
 
-  const mrr = sum(data.payments.filter((p) => p.entitled && !p.lifetime));
-  const mrrNew = sum(data.payments.filter((p) => p.entitled && !p.lifetime && inWin(p, win.cur)));
+  const mrrRows = data.payments.filter((p) => p.entitled && !p.lifetime);
+  const mrrNewRows = mrrRows.filter((p) => inWin(p, win.cur));
+  const mrrNew = sum(mrrNewRows);
 
   const cmpNote = win.cmp ? `vs ${win.cmp}` : 'all time';
   const prevSub = (v, fmt = usd) => (prevRange === null ? cmpNote : `${fmt(v)} ${cmpNote}`);
@@ -1150,10 +1257,18 @@ function sectionOverview(data, store, slug) {
   };
 
   // Top products with per-product change vs the previous window.
+  // Keyed by product — and by currency too when the rows mix them, so a bar
+  // never adds kroner to dollars under one label.
+  const planKey = (p) => (mono ? p.planName : `${p.planName} · ${String(p.currency ?? STORE_CURRENCY).toUpperCase()}`);
+  const keyCur = new Map();
   const byPlan = new Map();
-  for (const p of inRange) byPlan.set(p.planName, (byPlan.get(p.planName) ?? 0) + p.amountUsd);
+  for (const p of inRange) { const k = planKey(p); byPlan.set(k, (byPlan.get(k) ?? 0) + p.amountUsd); keyCur.set(k, p.currency ?? STORE_CURRENCY); }
   const byPlanPrev = new Map();
-  if (prevRange) for (const p of prevRange) byPlanPrev.set(p.planName, (byPlanPrev.get(p.planName) ?? 0) + p.amountUsd);
+  if (prevRange) for (const p of prevRange) { const k = planKey(p); byPlanPrev.set(k, (byPlanPrev.get(k) ?? 0) + p.amountUsd); keyCur.set(k, p.currency ?? STORE_CURRENCY); }
+  // The server names the one currency every row shares, or null when they
+  // differ — then it is one figure per currency, never a mislabelled sum.
+  const allEnts = data.totals.currency === null && data.totals.byCurrency ? Object.entries(data.totals.byCurrency).sort((a, b) => b[1] - a[1]) : null;
+  const allTime = allEnts ? (allEnts.length ? allEnts.map(([c, v]) => usd(v, c)).join(' + ') : usd(0)) : usd(data.totals.allTimeUsd, data.totals.currency ?? undefined);
   const top = [...byPlan.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
   const topMax = Math.max(...top.map(([, v]) => v), 1);
   const topDelta = (name, v) => {
@@ -1172,10 +1287,10 @@ function sectionOverview(data, store, slug) {
   const prefs = store.dashboardPrefs ?? {};
   const cards = { revenue: true, sales: true, members: true, mrr: true, ...(prefs.cards ?? {}) };
   const statCards = [
-    cards.revenue ? statCard('Revenue', usd(rev), I.dollar, pct(rev, revPrev), prevSub(revPrev), sparks.rev) : '',
+    cards.revenue ? statCard('Revenue', money(inRange), I.dollar, mono ? pct(rev, revPrev) : null, prevRange === null ? cmpNote : `${money(prevRange)} ${cmpNote}`, sparks.rev) : '',
     cards.sales ? statCard('Sales', sales, I.cart, pct(sales, salesPrev), prevSub(salesPrev, (v) => v), sparks.sales) : '',
     cards.members ? statCard('New members', newMembers, I.users, pct(newMembers, newMembersPrev), prevSub(newMembersPrev, (v) => v), sparks.members) : '',
-    cards.mrr ? statCard('MRR', usd(mrr), I.infinity, null, mrrNew > 0 ? `+${usd(mrrNew)} added this period` : 'recurring, right now', sparks.mrr) : '',
+    cards.mrr ? statCard('MRR', money(mrrRows), I.infinity, null, mrrNew > 0 ? `+${money(mrrNewRows)} added this period` : 'recurring, right now', sparks.mrr) : '',
   ].join('');
   return `
     <div class="ov-toolbar">
@@ -1189,7 +1304,7 @@ function sectionOverview(data, store, slug) {
     <div class="chart-grid">
       <section class="panel chart-card" id="rev-card">
         <div class="card-head"><div><h3>Revenue</h3><p class="card-sub">${win.cmp ? `This period against ${win.cmp}` : 'Monthly, all time'}</p></div>
-          <div class="chart-side"><span class="chart-total">${usd(rev)}${deltaChip(pct(rev, revPrev))}</span>
+          <div class="chart-side"><span class="chart-total">${money(inRange)}${mono ? deltaChip(pct(rev, revPrev)) : ''}</span>
             <span class="chart-legend"><span class="lg-key cur"></span>This period${series.prevVals ? '<span class="lg-key prev"></span>Previous' : ''}</span></div></div>
         ${revenueChart(series)}
       </section>
@@ -1199,13 +1314,13 @@ function sectionOverview(data, store, slug) {
           top.length
             ? `<ul class="top-list">${top
                 .map(
-                  ([name, v]) => `<li><span class="top-meta"><strong>${esc(name)}</strong><span class="num">${usd(v)} ${topDelta(name, v)}</span></span>
+                  ([name, v]) => `<li><span class="top-meta"><strong>${esc(name)}</strong><span class="num">${usd(v, keyCur.get(name))} ${topDelta(name, v)}</span></span>
                     <span class="top-bar"><span style="width:${Math.max((v / topMax) * 100, 2)}%"></span></span></li>`,
                 )
                 .join('')}</ul>`
             : '<div class="empty-chart">No sales in this period</div>'
         }
-        <p class="rows-note">Active members: ${data.totals.activeMembers} · All-time revenue: ${usd(data.totals.allTimeUsd)}</p>
+        <p class="rows-note">Active members: ${data.totals.activeMembers} · All-time revenue: ${allTime}</p>
       </section>
     </div>
     <div class="chart-grid">
@@ -1214,7 +1329,7 @@ function sectionOverview(data, store, slug) {
         <a class="btn-secondary" href="#/store/${esc(slug)}/payments">View all ${I.arrow}</a></div>
         ${
           data.payments.length
-            ? `<div class="table-scroll"><table class="data-table t-pay"><thead><tr><th>Customer</th><th>Product</th><th class="num">Amount</th><th>Status</th><th>Date</th></tr></thead><tbody>${paymentsRows(data.payments.slice(0, 8))}</tbody></table></div>`
+            ? `<div class="table-scroll" tabindex="0" role="region" aria-label="Table, scrolls sideways"><table class="data-table t-pay"><thead><tr><th>Customer</th><th>Product</th><th class="num">Amount</th><th>Status</th><th>Date</th></tr></thead><tbody>${paymentsRows(data.payments.slice(0, 8))}</tbody></table></div>`
             : `<div class="empty-chart">No transactions yet — share your store link from the Store section.</div>`
         }
       </section>
@@ -1226,7 +1341,7 @@ function sectionOverview(data, store, slug) {
                 .map(
                   (p) => `<li><span class="g-icon g-icon-fallback sale-ic">${esc((p.username ?? '?').slice(0, 1).toUpperCase())}</span>
                     <span class="sale-meta"><strong>${p.username ? '@' + esc(p.username) : esc(p.discordId)}</strong><span class="dim">${esc(p.planName)} · ${fmtDT(p.createdAt)}</span></span>
-                    <span class="sale-amt">${usd(p.amountUsd)}</span></li>`,
+                    <span class="sale-amt">${usd(p.amountUsd, p.currency)}</span></li>`,
                 )
                 .join('')}</ul>`
             : '<div class="empty-chart">No recent sales</div>'
@@ -1243,11 +1358,18 @@ async function renderChecklist(store, slug) {
     const products = await loadProducts(store);
     const withRoles = products.filter((p) => (p.roleIds ?? []).length);
     let rolesOk = true;
+    let rolesGone = false;
     if (withRoles.length) {
       const data = await api('/api/onboard', { step: 'roles', storeId: store.id }).catch(() => null);
       if (data) {
-        const usable = new Set(data.roles.filter((r) => r.usable).map((r) => r.id));
-        rolesOk = withRoles.every((p) => p.roleIds.every((rid) => usable.has(rid)));
+        // Two different failures, two different fixes: a role that is no
+        // longer in the server needs re-picking; one that exists but sits
+        // above the bot needs dragging. One `usable` test blamed both on the
+        // bot's position.
+        const known = new Map(data.roles.map((r) => [r.id, r]));
+        const wanted = withRoles.flatMap((p) => p.roleIds);
+        rolesGone = wanted.some((rid) => !known.has(rid));
+        rolesOk = wanted.every((rid) => !known.has(rid) || known.get(rid).usable);
       }
     }
     const checks = [
@@ -1257,12 +1379,15 @@ async function renderChecklist(store, slug) {
       // at all. The built-in store rides on the platform's own key.
       {
         ok: Boolean(store.isDefault || store.hasStripeKey),
-        label: 'Payment method connected — Stripe',
+        label: store.stripeKeyBroken ? 'Stripe key needs re-entering' : 'Payment method connected — Stripe',
         href: `#/store/${slug}/settings`,
-        hint: 'Add your Stripe secret key in Settings — until then no one can pay you.',
+        hint: store.stripeKeyBroken
+          ? 'Your saved Stripe key can no longer be read — paste it again in Settings. Until then no one can pay you.'
+          : 'Add your Stripe secret key in Settings — until then no one can pay you.',
       },
       { ok: products.length > 0, label: 'First product created', href: `#/store/${slug}/products` },
       { ok: store.status === 'live' && withRoles.length > 0, label: 'Store published with a role to deliver', href: `#/store/${slug}/products` },
+      { ok: !rolesGone, label: 'Every role a product delivers still exists', href: `#/store/${slug}/products`, hint: 'A role was deleted from your server — open the product and pick its role again. Until then Dues delivers a role with the same name, if there is one.' },
       { ok: rolesOk, label: 'Bot role sits above the roles it delivers', href: null, hint: 'Drag the Dues role higher in Server Settings → Roles.' },
     ];
     if (checks.every((c) => c.ok)) return;
@@ -1304,7 +1429,7 @@ function productEditorFields(p = {}) {
     <div class="field-row">
       <label class="field"><span class="field-label">Name <span aria-hidden="true">*</span></span>
         <input class="pe-name" type="text" maxlength="80" value="${esc(p.name ?? '')}" placeholder="Premium" /></label>
-      <label class="field"><span class="field-label">Price (USD) <span aria-hidden="true">*</span></span>
+      <label class="field"><span class="field-label">Price (${esc(STORE_CURRENCY.toUpperCase())}) <span aria-hidden="true">*</span></span>
         <input class="pe-price" type="text" inputmode="decimal" value="${p.priceUsd ?? ''}" placeholder="59.99" autocomplete="off" /></label>
     </div>
     <label class="field"><span class="field-label">Description</span>
@@ -1356,7 +1481,7 @@ function optionRowHtml() {
   return `<div class="field-row pe-opt-row">
     <label class="field"><span class="field-label">Option label</span>
       <input class="po-label" type="text" maxlength="40" placeholder="Monthly" /></label>
-    <label class="field"><span class="field-label">Price (USD)</span>
+    <label class="field"><span class="field-label">Price (${esc(STORE_CURRENCY.toUpperCase())})</span>
       <input class="po-price" type="text" inputmode="decimal" placeholder="50" autocomplete="off" /></label>
     <label class="field"><span class="field-label">Billing</span>
       <select class="po-billing">
@@ -1387,7 +1512,7 @@ function sectionProducts(products, data, slug) {
             : `${p.imageUrl ? `<img class="prod-thumb" src="${esc(p.imageUrl)}" alt="" width="30" height="30" />` : '<span class="prod-thumb prod-thumb-empty"></span>'}
           <span><strong>${esc(p.name)}</strong><span class="dim prod-roles"> ${esc((p.roleNames ?? []).map(roleLabel).join(', '))}${p.requiredRoleId ? ` · ${esc(roleLabel(p.requiredRoleName ?? 'role'))} only` : ''}</span></span>`
         }</td>
-        <td class="num">${usd(p.priceUsd)}</td>
+        <td class="num">${usd(p.priceUsd, p.currency)}</td>
         <td class="dim">${billingLabel(p)}${
           p.expiresAt ? (p.expiresAt * 1000 <= Date.now() ? ' · <strong>ended</strong>' : ` · ends ${new Date(p.expiresAt * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`) : ''
         }</td>
@@ -1419,7 +1544,7 @@ function sectionProducts(products, data, slug) {
       </form>
       ${
         products.length
-          ? `<div class="table-scroll"><table class="data-table t-products"><thead><tr><th>Product</th><th class="num">Price</th><th>Billing</th><th class="num">Members</th><th class="num">Revenue</th><th>Active</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`
+          ? `<div class="table-scroll" tabindex="0" role="region" aria-label="Table, scrolls sideways"><table class="data-table t-products"><thead><tr><th>Product</th><th class="num">Price</th><th>Billing</th><th class="num">Members</th><th class="num">Revenue</th><th>Active</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`
           : '<div class="empty-chart">No products yet. <button class="btn-pill" id="prod-new-2">Add your first product</button></div>'
       }
       <p class="field-err" id="err-products" role="alert"></p>
@@ -1449,7 +1574,7 @@ function sectionDiscounts(discounts, products, slug) {
           <label class="field"><span class="field-label">Code <span aria-hidden="true">*</span></span>
             <input id="dc-code" type="text" maxlength="32" placeholder="LAUNCH20" style="text-transform:uppercase" spellcheck="false" /></label>
           <label class="field"><span class="field-label">Type</span>
-            <select id="dc-kind"><option value="percent">Percent off</option><option value="fixed">Fixed USD off</option></select></label>
+            <select id="dc-kind"><option value="percent">Percent off</option><option value="fixed">Fixed ${esc(STORE_CURRENCY.toUpperCase())} off</option></select></label>
           <label class="field"><span class="field-label">Amount <span aria-hidden="true">*</span></span>
             <input id="dc-amount" type="text" inputmode="decimal" placeholder="20" autocomplete="off" /></label>
         </div>
@@ -1466,7 +1591,7 @@ function sectionDiscounts(discounts, products, slug) {
       </form>
       ${
         discounts.length
-          ? `<div class="table-scroll"><table class="data-table t-disc"><thead><tr><th>Code</th><th>Discount</th><th>Scope</th><th class="num">Uses</th><th>Expires</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`
+          ? `<div class="table-scroll" tabindex="0" role="region" aria-label="Table, scrolls sideways"><table class="data-table t-disc"><thead><tr><th>Code</th><th>Discount</th><th>Scope</th><th class="num">Uses</th><th>Expires</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`
           : '<div class="empty-chart">No discount codes yet.</div>'
       }
       <p class="field-err" id="err-discounts" role="alert"></p>
@@ -1537,10 +1662,15 @@ const THEME_DEFAULTS = { bg: '#0a0a0a', panel: '#101010', text: '#f5f5f4', accen
 // is a wallpaper and needs a plan. src/lib/theme.js FREE_BG_PRESETS is the
 // server's copy of the same ten; a scenario in the suite holds them together.
 const BG_CATALOG = [
-  { id: 'clouds-day', label: 'Clouds · day', tone: 'light', thumb: '/sky-day-tall.jpg', live: true },
-  { id: 'clouds-night', label: 'Clouds · night', tone: 'dark', thumb: '/sky-night-tall.jpg', live: true },
-  { id: 'sky-day', label: 'Sky · day', tone: 'light', thumb: '/sky-day-tall.jpg' },
-  { id: 'sky-night', label: 'Sky · night', tone: 'dark', thumb: '/sky-night-tall.jpg' },
+  // These four read as two duplicated tiles unless the difference is visible
+  // BEFORE you pick: the animated pair and the still pair were shipping the
+  // same photograph under near-identical names. The stills now use the wide
+  // crop (a different frame of the same sky), and the names say which is
+  // which — 'Sky photo' is what src/lib/theme.js has always called them.
+  { id: 'clouds-day', label: 'Clouds · day (moving)', tone: 'light', thumb: '/sky-day-tall.jpg', live: true },
+  { id: 'clouds-night', label: 'Clouds · night (moving)', tone: 'dark', thumb: '/sky-night-tall.jpg', live: true },
+  { id: 'sky-day', label: 'Sky photo · day (still)', tone: 'light', thumb: '/sky-day.jpg' },
+  { id: 'sky-night', label: 'Sky photo · night (still)', tone: 'dark', thumb: '/sky-night.jpg' },
   { id: 'mountains', label: 'Mountains', tone: 'dark', thumb: '/bg/mountains.jpg' },
   { id: 'forest', label: 'Forest', tone: 'dark', thumb: '/bg/forest.jpg' },
   { id: 'dunes', label: 'Dunes', tone: 'dark', thumb: '/bg/dunes.jpg' },
@@ -1613,6 +1743,8 @@ function previewThemeCss(t) {
     `.checkout .panel, .checkout .order-product, .checkout .order-roles, .checkout .pay-panel, .checkout .order-extra { border-radius: ${t.radius}px; }`,
     `.checkout .pay-btn, .checkout .apply-btn, .checkout .method, .checkout input, .checkout .op-thumb { border-radius: ${small}px; }`,
     font ? `body, .checkout button, .checkout input, .order-title, .op-price, .pay-panel h2 { font-family: ${font}; }` : '',
+    // mirrors themeCss: the white wordmark inverts on a light ground with no layer
+    t.bg && !t.bgPreset && !t.bgUrl && inkFor(t.bg) === '#0a0a0a' ? '.platform-mark, .powered-mark { filter: invert(1); }' : '',
   ].join('\n');
 }
 
@@ -1919,6 +2051,13 @@ function sectionCustomize(store) {
             <label class="dc-custom" title="Custom color"><input type="color" id="dc-color" value="${curAccent || '#ededed'}" aria-label="Custom accent color" /></label>
           </div>
           <p class="field-help dc-help">Paints every chart, sparkline and highlight in the dashboard.</p></div>
+        <div class="dc-row"><span class="dc-lab">Dark style</span>
+          <div class="dc-faces" role="group" aria-label="Dark dashboard style">
+            ${[['navy', 'Navy', '#101827', '#182338'], ['black', 'Black', '#0a0a0b', '#141416']]
+              .map(([k, lbl, bg, panel]) => `<button type="button" class="dc-face${(prefs.darkStyle ?? 'navy') === k ? ' active' : ''}" data-face="${k}" aria-pressed="${(prefs.darkStyle ?? 'navy') === k}">
+                <span class="dc-face-chip" style="background:${bg}"><i style="background:${panel}"></i></span>${lbl}</button>`).join('')}
+          </div>
+          <p class="field-help dc-help">Which dark the dashboard uses. The sun switches to the light theme either way.</p></div>
         <div class="dc-row"><span class="dc-lab">Stat cards</span>
           <div class="dc-checks">
             ${[['revenue', 'Revenue'], ['sales', 'Sales'], ['members', 'New members'], ['mrr', 'MRR']]
@@ -1935,11 +2074,20 @@ function sectionCustomize(store) {
       foot: `<button class="btn-pill" id="dc-save">Save</button>
         <button class="btn-ghost" id="dc-reset">Reset to default</button>`,
     })}
-    ${setCard({
-      title: 'Storefront',
-      sub: 'What buyers see has its own controls — colors, corners and type live in the Store section.',
-      body: `<div class="dc-body"><a class="btn-secondary dc-open" href="#/store/${esc(store.slug)}/store">${I.shop} Open store appearance</a></div>`,
-    })}
+    ${/* Not a card. This panel had a title, a sentence and one link, and spent
+          169px of a phone screen saying where something else lives — 115px of
+          it empty to the right of a left-aligned button. The settings stack
+          already dropped a card for this exact reason ("a panel that only
+          announces a behaviour is furniture"); pointing somewhere is
+          navigation, so it gets the shape navigation has. */ ''}
+    <a class="jumprow" href="#/store/${esc(store.slug)}/store">
+      <span class="jumprow-ic" aria-hidden="true">${I.shop}</span>
+      <span class="jumprow-txt">
+        <b>Store appearance</b>
+        <small>Colors, corners and type</small>
+      </span>
+      <span class="jumprow-go" aria-hidden="true">${I.arrow}</span>
+    </a>
     </div>`;
 }
 
@@ -1951,6 +2099,23 @@ function wireCustomize(store, slug) {
     s.onclick = () => { pickedAccent = s.dataset.accent; markSwatch(); };
   });
   $('#dc-color').oninput = (e) => { pickedAccent = e.target.value.toLowerCase(); markSwatch(); };
+
+  // Applied on click, before Save. A colour scheme is judged by looking at it,
+  // and a picker that only takes effect after a round trip makes the seller
+  // save to find out. Reverted on navigation if they never save, because the
+  // attribute is re-derived from the stored prefs on every render.
+  let pickedFace = prefs.darkStyle === 'black' ? 'black' : 'navy';
+  document.querySelectorAll('.dc-face').forEach((btn) => {
+    btn.onclick = () => {
+      pickedFace = btn.dataset.face;
+      document.querySelectorAll('.dc-face').forEach((b) => {
+        const on = b.dataset.face === pickedFace;
+        b.classList.toggle('active', on);
+        b.setAttribute('aria-pressed', String(on));
+      });
+      applyDarkFace(pickedFace);
+    };
+  });
   const saveDc = async (prefsBody) => {
     const btn = $('#dc-save');
     btn.disabled = true;
@@ -1973,9 +2138,10 @@ function wireCustomize(store, slug) {
       accent: pickedAccent || null,
       cards: cardPicks,
       defaultRange: $('#dc-range').value,
+      darkStyle: pickedFace,
     });
   };
-  $('#dc-reset').onclick = () => saveDc(null);
+  $('#dc-reset').onclick = () => { applyDarkFace('navy'); saveDc(null); };
 }
 
 // Billing gets its own top-level section so upgrading a plan is one click from
@@ -2008,6 +2174,43 @@ function sectionSettings(store, isPlatformOwner) {
               ${keyScopesHtml()}
               <p class="field-err" id="err-pm" role="alert"></p>`,
             foot: `<button class="btn-secondary" id="pm-save">Update key</button>`,
+          })
+        : ''
+    }
+    ${
+      !store.isDefault
+        ? setCard({
+            id: 'cur-card',
+            title: 'Currency',
+            sub: 'What you price in. Buyers everywhere still see their own currency at checkout — this is the one you get paid in.',
+            body: `
+              <label class="field"><span class="field-label">Price my products in</span>
+                <select id="cur-select"><option value="">Loading…</option></select>
+                <span class="field-help" id="cur-help">Read from your Stripe account — these are the currencies it can be paid out in.</span></label>
+              <p class="cur-note" id="cur-note" hidden></p>
+              <p class="field-err" id="err-cur" role="alert"></p>`,
+            foot: `<button class="btn-secondary" id="cur-save">Save</button>`,
+          })
+        : ''
+    }
+    ${
+      !store.isDefault
+        ? setCard({
+            id: 'cw-card',
+            title: 'Crypto payouts',
+            sub: 'Optional. Buyers can pay in crypto and it forwards straight to this wallet — Dues never holds it and cannot recover a payment sent to the wrong address.',
+            body: `
+              <label class="field"><span class="field-label">Pay me in</span>
+                <select id="cw-chain"><option value="">Loading coins…</option></select>
+                <span class="field-help">The coin and network your wallet is on. Read live from the payment provider.</span></label>
+              <label class="field"><span class="field-label">Wallet address</span>
+                <input id="cw-addr" type="text" placeholder="Paste your wallet address" autocomplete="off" spellcheck="false" />
+                <span class="field-help" id="cw-check">Checked against the rules of the network you pick.</span></label>
+              <label class="field"><span class="field-label">Type it again to confirm</span>
+                <input id="cw-confirm" type="text" placeholder="Retype the same address" autocomplete="off" spellcheck="false" />
+                <span class="field-help">Crypto payouts cannot be reversed, so this one is typed twice on purpose.</span></label>
+              <p class="field-err" id="err-cw" role="alert"></p>`,
+            foot: `<button class="btn-secondary" id="cw-save">Save wallet</button><button class="btn-ghost" id="cw-clear">Turn crypto off</button>`,
           })
         : ''
     }
@@ -2061,6 +2264,9 @@ async function viewStore(slug) {
     return;
   }
   const store = data.stores.find((s) => s.slug === slug) ?? data.stores[0];
+  // Before a single figure is formatted: every price, total and axis label
+  // below is denominated in this store's currency.
+  STORE_CURRENCY = String(store?.currency ?? 'usd').toLowerCase();
   const link = `${location.origin}/${store.slug}`;
   const section = location.hash.split('/')[3] ?? 'overview';
   // Saved dashboard preferences: the accent recolors every chart and active
@@ -2068,6 +2274,9 @@ async function viewStore(slug) {
   // the owner picks a range by hand this visit.
   const dashPrefs = store.dashboardPrefs ?? {};
   const dashAccent = /^#[0-9a-f]{6}$/i.test(String(dashPrefs.accent ?? '')) ? dashPrefs.accent : null;
+  // The ground, re-derived from the stored preference on every render — which
+  // is also what discards an unsaved preview the moment you navigate.
+  applyDarkFace(dashPrefs.darkStyle === 'black' ? 'black' : 'navy');
   if (dashPrefs.defaultRange && state.rangePicked !== store.slug && RANGES.some(([k]) => k === dashPrefs.defaultRange)) {
     state.range = dashPrefs.defaultRange;
   }
@@ -2121,7 +2330,7 @@ async function viewStore(slug) {
             <option value="">Status: all</option><option value="lifetime">Lifetime</option><option value="active">Active</option><option value="ended">Ended</option>
           </select>
         </div>
-        <div class="table-scroll"><table class="data-table t-pay"><thead><tr><th>Customer</th><th>Product</th><th class="num">Amount</th><th>Status</th><th>Date</th></tr></thead><tbody id="tx-body">${paymentsRows(data.payments)}</tbody></table></div>
+        <div class="table-scroll" tabindex="0" role="region" aria-label="Table, scrolls sideways"><table class="data-table t-pay"><thead><tr><th>Customer</th><th>Product</th><th class="num">Amount</th><th>Status</th><th>Date</th></tr></thead><tbody id="tx-body">${paymentsRows(data.payments)}</tbody></table></div>
         <p class="rows-note" id="tx-count">${data.payments.length} row(s)</p>
       </section>
 
@@ -2139,7 +2348,7 @@ async function viewStore(slug) {
             <option value="">Status: all</option><option value="completed">Paid</option><option value="started">Not finished</option>
           </select>
         </div>
-        <div class="table-scroll"><table class="data-table t-pay"><thead><tr><th>Customer</th><th>Product</th><th class="num">Amount</th><th>Status</th><th>Started</th><th>Paid</th></tr></thead><tbody id="ck-body">${checkoutRows(checkouts)}</tbody></table></div>
+        <div class="table-scroll" tabindex="0" role="region" aria-label="Table, scrolls sideways"><table class="data-table t-pay"><thead><tr><th>Customer</th><th>Product</th><th class="num">Amount</th><th>Status</th><th>Started</th><th>Paid</th></tr></thead><tbody id="ck-body">${checkoutRows(checkouts)}</tbody></table></div>
         <p class="rows-note" id="ck-count">${checkouts.length} row(s)</p>
       </section>`;
   } else if (section === 'members') {
@@ -2159,7 +2368,7 @@ async function viewStore(slug) {
     const memberRows = members
       .map(
         (m) => `<tr data-member="${esc(m.discordId)}">
-          <td>${m.username ? '@' + esc(m.username) : ''}<span class="dim"> ${esc(m.discordId)}</span></td>
+          <td>${m.username ? `@${esc(m.username)}<span class="dim"> ${esc(m.discordId)}</span>` : esc(m.discordId)}</td>
           <td>${esc([...m.products].join(', ') || '—')}</td>
           <td class="num">${usd(m.spent)}</td>
           <td>${m.lifetime ? '<span class="chip chip-good">Lifetime</span>' : m.entitled ? '<span class="chip chip-good">Active</span>' : '<span class="chip chip-off">Ended</span>'}</td>
@@ -2187,7 +2396,7 @@ async function viewStore(slug) {
         </form>
         ${
           members.length
-            ? `<div class="table-scroll"><table class="data-table t-members"><thead><tr><th>Member</th><th>Products</th><th class="num">Total spent</th><th>Status</th><th></th></tr></thead><tbody>${memberRows}</tbody></table></div>
+            ? `<div class="table-scroll" tabindex="0" role="region" aria-label="Table, scrolls sideways"><table class="data-table t-members"><thead><tr><th>Member</th><th>Products</th><th class="num">Total spent</th><th>Status</th><th></th></tr></thead><tbody>${memberRows}</tbody></table></div>
                <p class="rows-note">${members.length} member(s)</p>`
             : '<div class="empty-chart">No members yet.</div>'
         }
@@ -2226,7 +2435,14 @@ async function viewStore(slug) {
   // off-screen, and drop it at the end of the scroll.
   const sb = document.querySelector('.sidebar');
   if (sb) {
-    const updFade = () => sb.classList.toggle('scroll-more', sb.scrollWidth - sb.clientWidth - sb.scrollLeft > 8);
+    // Both ends, not just the right. The strip auto-centres the active tab, so
+    // it is usually scrolled AWAY from the start — and a word chopped at the
+    // left edge at full opacity does not read as "scrolled", it reads as a nav
+    // item genuinely labelled "hboard".
+    const updFade = () => {
+      sb.classList.toggle('scroll-more', sb.scrollWidth - sb.clientWidth - sb.scrollLeft > 8);
+      sb.classList.toggle('scroll-back', sb.scrollLeft > 8);
+    };
     sb.addEventListener('scroll', updFade, { passive: true });
     addEventListener('resize', updFade, { passive: true });
     // Choosing a section re-renders this bar, and a fresh element starts at
@@ -2319,7 +2535,10 @@ async function viewStore(slug) {
     $('#tx-status').onchange = apply;
     $('#tx-export').onclick = () => {
       const rows = filtered();
-      const head = 'date,username,discord_id,store,product,amount_usd,status,provider';
+      // amount_usd kept as the column name so existing spreadsheets and
+      // imports do not break; `currency` beside it says what the number
+      // actually is, which is the part that was previously a guess.
+      const head = 'date,username,discord_id,store,product,amount_usd,currency,status,provider';
       // Quote every cell AND neutralize spreadsheet formula injection: a value
       // that starts with = + - @ or a control char (e.g. a buyer username the
       // buyer chose) would otherwise run as a formula when the CSV is opened in
@@ -2330,7 +2549,7 @@ async function viewStore(slug) {
         return `"${s.replace(/"/g, '""')}"`;
       };
       const csv = [head, ...rows.map((p) =>
-        [new Date(p.createdAt * 1000).toISOString(), p.username ?? '', p.discordId, p.storeSlug, p.planName, p.amountUsd.toFixed(2), p.status, p.provider].map(cell).join(','),
+        [new Date(p.createdAt * 1000).toISOString(), p.username ?? '', p.discordId, p.storeSlug, p.planName, p.amountUsd.toFixed(curDp(p.currency)), (p.currency ?? 'usd').toUpperCase(), p.status, p.provider].map(cell).join(','),
       )].join('\n');
       const a = document.createElement('a');
       a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
@@ -2340,12 +2559,18 @@ async function viewStore(slug) {
     };
   }
 
+  wireTableScroll();
   if (section === 'members') wireMembers(slug);
   if (section === 'products' && !store.isDefault) wireProducts(store, slug, products);
   if (section === 'discounts' && !store.isDefault) wireDiscounts(store, slug);
   if (section === 'store' && !store.isDefault) { wireStoreSettings(store, slug); wireAppearance(store, slug); wireDiscovery(store, slug); }
   if (section === 'customize' && !store.isDefault) wireCustomize(store, slug);
-  if (section === 'billing') renderBillingPanel();
+  if (section === 'billing') {
+    renderBillingPanel().catch(() => {
+      const el = $('#billing-body');
+      if (el) el.innerHTML = '<p class="note-help">Could not load your plan — refresh to try again.</p>';
+    });
+  }
   if (section === 'settings') {
     const pmSave = $('#pm-save');
     if (pmSave)
@@ -2366,8 +2591,25 @@ async function viewStore(slug) {
           fieldErr('pm', err.message);
         }
       };
+    wireCurrency(store, slug);
+    wireCryptoWallet(store, slug);
     wireReceiptSettings(store, slug);
   }
+}
+
+// The sideways-scroll affordance on every data table. Same idiom as the
+// section nav: a fade on the right edge while there is more to reach, gone
+// once you are at the end. Called after every section render, and idempotent —
+// a table that already has its listener is skipped.
+function wireTableScroll() {
+  document.querySelectorAll('.table-scroll').forEach((el) => {
+    if (el.dataset.fade === '1') return;
+    el.dataset.fade = '1';
+    const upd = () => el.classList.toggle('scroll-more', el.scrollWidth - el.clientWidth - el.scrollLeft > 8);
+    el.addEventListener('scroll', upd, { passive: true });
+    window.addEventListener('resize', upd);
+    upd();
+  });
 }
 
 function wireMembers(slug) {
@@ -2431,7 +2673,7 @@ function wireMembers(slug) {
         .then((r) => r.json())
         .then((d) => {
           $('#am-plan').innerHTML = (d.plans ?? [])
-            .map((p) => `<option value="${esc(p.id)}">${esc(p.name)} — $${p.priceUsd}</option>`)
+            .map((p) => `<option value="${esc(p.id)}">${esc(p.name)} — ${esc(usd(p.priceUsd, p.currency))}</option>`)
             .join('');
         })
         .catch(() => {});
@@ -2767,7 +3009,7 @@ function wireProducts(store, slug, products) {
       const p = products.find((x) => x.planKey === b.dataset.plan);
       const kids = products.filter((x) => x.variantOf === b.dataset.plan);
       const extra = kids.length ? ` Its ${kids.length} pricing option${kids.length === 1 ? '' : 's'} go with it.` : '';
-      if (!confirm(`Delete "${p?.name ?? b.dataset.plan}"?\n\nBuyers keep what they already bought; the product just stops being sold.${extra}`)) return;
+      if (!confirm(`Delete "${p?.name ?? b.dataset.plan}"?\n\nThis removes it for good. If any member still holds it the delete is refused — deactivate instead to stop selling while they keep their access.${extra}`)) return;
       b.disabled = true;
       try {
         await api('/api/onboard', { step: 'product-delete', storeId: store.id, planKey: b.dataset.plan });
@@ -3337,6 +3579,249 @@ async function wireSaleNotifications(store, slug) {
   } catch (err) {
     sel.innerHTML = `<option value="">Couldn’t load channels</option>`;
     fieldErr('nc', err.message);
+  }
+}
+
+// The currency card. Everything it offers comes from the seller's OWN Stripe
+// account: Dues asks for no bank details, holds none, and cannot add a
+// currency on the seller's behalf. Adding one means adding a bank account in
+// Stripe, and then it appears here. Skipping is the default — a seller who
+// never opens this card keeps pricing in the currency they already were.
+function wireCurrency(store, slug) {
+  const sel = $('#cur-select');
+  const save = $('#cur-save');
+  const note = $('#cur-note');
+  const help = $('#cur-help');
+  if (!sel || !save) return;
+  const current = String(store.currency ?? 'usd').toLowerCase();
+  // Intl carries every currency's name in the reader's own language, so there
+  // is no list of 133 names to ship, translate or let drift.
+  let names = null;
+  try { names = new Intl.DisplayNames(undefined, { type: 'currency' }); } catch { /* older browser */ }
+  const label = (c) => {
+    const code = c.toUpperCase();
+    const full = names?.of(code);
+    return full && full !== code ? `${code} — ${full}` : code;
+  };
+  const only = (c, why) => {
+    sel.innerHTML = `<option value="${esc(c)}">${esc(label(c))}</option>`;
+    sel.value = c;
+    sel.disabled = true;
+    save.disabled = true;
+    if (help) help.textContent = why;
+  };
+
+  (async () => {
+    let info;
+    try {
+      info = await api('/api/admin/store', { store: slug, action: 'payout-currencies' });
+    } catch {
+      only(current, 'Stripe did not answer just now — reload to pick a different currency.');
+      return;
+    }
+    if (!info.connected) {
+      only(current, 'Connect your Stripe account first, then the currencies it can be paid out in show up here.');
+      return;
+    }
+    const options = info.currencies?.length ? info.currencies : [current];
+    sel.innerHTML = options.map((c) => `<option value="${esc(c)}">${esc(label(c))}</option>`).join('');
+    sel.value = options.includes(current) ? current : options[0];
+    if (help) {
+      help.textContent = options.length > 1
+        ? 'Read from your Stripe account — these are the currencies it can be paid out in.'
+        : 'This is the only currency your Stripe account can be paid out in. Add a bank account in Stripe to get more.';
+    }
+    if (note) {
+      // Two separate truths, and conflating them is how a seller ends up
+      // thinking Dues holds their money. Buyers get local currency because
+      // STRIPE converts at checkout; the seller is still paid in the one
+      // currency chosen above, into their own account.
+      note.innerHTML = 'Buyers in 150+ countries are shown the price in their own currency at checkout and can pay in it. '
+        + 'Stripe does the conversion and you are still paid in ' + esc(sel.value.toUpperCase()) + '. '
+        + 'It costs you nothing — the conversion fee sits in the rate the buyer is quoted, and they can switch back to '
+        + esc(sel.value.toUpperCase()) + ' on the payment page. '
+        + '<a href="https://dashboard.stripe.com/settings/money-management" target="_blank" rel="noopener">Add another payout currency in Stripe</a>.';
+      note.hidden = false;
+      sel.onchange = () => { wireCurrency.refreshNote?.(); };
+      wireCurrency.refreshNote = () => {
+        note.innerHTML = note.innerHTML.replace(/paid in [A-Z]{3}\./, `paid in ${sel.value.toUpperCase()}.`);
+      };
+    }
+  })();
+
+  save.onclick = async () => {
+    fieldErr('cur', '');
+    const next = sel.value;
+    if (!next || next === current) { save.textContent = 'Saved ✓'; setTimeout(() => { save.textContent = 'Save'; }, 1400); return; }
+    save.disabled = true;
+    save.textContent = 'Saving…';
+    const post = (extra) => api('/api/admin/store', { store: slug, currency: next, ...extra });
+    try {
+      try {
+        await post({});
+      } catch (err) {
+        // Dues has no exchange rate: with products live, the switch keeps
+        // every NUMBER and only changes its currency. The server refuses
+        // until the seller has seen the new stickers and said yes.
+        if (!err.body?.needsConfirm || err.body.currencyConfirm !== next) throw err;
+        const list = (err.body.repriced ?? []).map((r) => `${r.name}: ${r.before} → ${r.after}`).join('\n');
+        if (!confirm(`Prices are re-denominated, not converted. Your products would keep their numbers:\n\n${list}\n\nKeep these prices in ${next.toUpperCase()}? Cancel to re-price them first.`)) {
+          save.disabled = false;
+          save.textContent = 'Save';
+          return;
+        }
+        await post({ currencyConfirm: next });
+      }
+      save.textContent = 'Saved ✓';
+      // Every price on screen is denominated in the currency that just
+      // changed, so re-read rather than leave old numbers with a new label.
+      setTimeout(() => location.reload(), 700);
+    } catch (err) {
+      save.disabled = false;
+      save.textContent = 'Save';
+      fieldErr('cur', err.message);
+    }
+  };
+}
+
+// The crypto payout wallet.
+//
+// Everything about this card is shaped by one fact: a payout is an on-chain
+// transfer and there is no way to undo one. Dues holds nothing, so a wrong
+// address is not a support ticket — it is the seller's money, gone. Hence a
+// live check against the real rules of the chain, and a second typing before
+// it will save.
+function wireCryptoWallet(store, slug) {
+  const chain = $('#cw-chain');
+  const addr = $('#cw-addr');
+  const confirm = $('#cw-confirm');
+  const save = $('#cw-save');
+  const clear = $('#cw-clear');
+  const check = $('#cw-check');
+  if (!chain || !addr || !save) return;
+
+  const LABEL = {
+    btc: 'Bitcoin (BTC)', eth: 'Ethereum (ETH)', sol: 'Solana (SOL)', trx: 'Tron (TRX)',
+    ltc: 'Litecoin (LTC)', doge: 'Dogecoin (DOGE)', xrp: 'XRP', ada: 'Cardano (ADA)',
+    bnb: 'BNB Chain (BNB)', matic: 'Polygon (MATIC)', pol: 'Polygon (POL)',
+    usdterc20: 'USDT on Ethereum', usdttrc20: 'USDT on Tron', usdtsol: 'USDT on Solana',
+    usdtbsc: 'USDT on BNB Chain', usdtmatic: 'USDT on Polygon',
+    usdcerc20: 'USDC on Ethereum', usdcsol: 'USDC on Solana', usdcmatic: 'USDC on Polygon',
+    usdcbase: 'USDC on Base', usdcbsc: 'USDC on BNB Chain',
+  };
+  const label = (t) => LABEL[t] ?? t.toUpperCase();
+
+  addr.value = store.cryptoWallet ?? '';
+
+  // Live validation as they type: the same check the server runs, so nobody
+  // discovers a wrong-chain address only after pressing Save.
+  let checking = null;
+  const revalidate = async () => {
+    if (check) check.classList.remove('ok', 'bad');
+    if (!addr.value.trim() || !chain.value) {
+      if (check) check.textContent = 'Checked against the rules of the network you pick.';
+      return;
+    }
+    clearTimeout(checking);
+    checking = setTimeout(async () => {
+      try {
+        const r = await api('/api/admin/store', {
+          store: slug, action: 'crypto-check', cryptoWallet: addr.value.trim(), cryptoChain: chain.value,
+        });
+        if (!check) return;
+        if (!r.ok) {
+          check.textContent = r.error;
+          check.classList.add('bad');
+        } else if (r.verified) {
+          check.textContent = `Valid ${chain.options[chain.selectedIndex].text} address.`;
+          check.classList.add('ok');
+        } else {
+          check.textContent = 'Dues cannot check addresses on this network yet — make sure it is right before you save.';
+        }
+      } catch { /* the save still validates; a failed preview is not an error */ }
+    }, 300);
+  };
+  addr.oninput = revalidate;
+  chain.onchange = revalidate;
+
+  (async () => {
+    let info;
+    try {
+      info = await api('/api/admin/store', { store: slug, action: 'crypto-coins' });
+    } catch {
+      chain.innerHTML = '<option value="">Could not load coins — reload to try again</option>';
+      chain.disabled = true;
+      save.disabled = true;
+      return;
+    }
+    if (!info.enabled) {
+      // The platform has no crypto credentials configured. Saying so is
+      // better than a dead dropdown a seller keeps poking at.
+      chain.innerHTML = '<option value="">Crypto payments are not switched on for this deployment</option>';
+      chain.disabled = true;
+      addr.disabled = true;
+      confirm.disabled = true;
+      save.disabled = true;
+      return;
+    }
+    const coins = info.coins ?? [];
+    const current = String(store.cryptoChain ?? '').toLowerCase();
+    chain.innerHTML = ['<option value="">Choose a coin…</option>']
+      .concat(coins.map((c) => `<option value="${esc(c)}">${esc(label(c))}</option>`))
+      .join('');
+    if (current && coins.includes(current)) chain.value = current;
+    // Re-check what is already saved. A seller opening this card should be
+    // told the wallet on file is still valid for the chain on file, not be
+    // shown generic copy that says nothing about their own address.
+    revalidate();
+  })();
+
+  save.onclick = async () => {
+    fieldErr('cw', '');
+    const address = addr.value.trim();
+    if (!address) return fieldErr('cw', 'Paste your wallet address, or use “Turn crypto off”.');
+    if (!chain.value) return fieldErr('cw', 'Pick which coin and network you want to be paid in.');
+    if (confirm.value.trim() !== address) {
+      return fieldErr('cw', 'The two addresses do not match. Payouts cannot be reversed, so they have to be identical.');
+    }
+    save.disabled = true;
+    save.textContent = 'Saving…';
+    try {
+      await api('/api/admin/store', {
+        store: slug,
+        cryptoWallet: address,
+        cryptoChain: chain.value,
+        cryptoWalletConfirm: confirm.value.trim(),
+      });
+      store.cryptoWallet = address;
+      store.cryptoChain = chain.value;
+      confirm.value = '';
+      save.textContent = 'Saved ✓';
+      setTimeout(() => { save.textContent = 'Save wallet'; save.disabled = false; }, 1400);
+    } catch (err) {
+      save.disabled = false;
+      save.textContent = 'Save wallet';
+      fieldErr('cw', err.message);
+    }
+  };
+
+  if (clear) {
+    clear.onclick = async () => {
+      if (!store.cryptoWallet) return fieldErr('cw', 'There is no wallet saved.');
+      if (!window.confirm('Turn crypto payments off for this store? Buyers will only see the card option.')) return;
+      clear.disabled = true;
+      try {
+        await api('/api/admin/store', { store: slug, cryptoWallet: '' });
+        store.cryptoWallet = null;
+        store.cryptoChain = null;
+        addr.value = '';
+        confirm.value = '';
+        chain.value = '';
+      } catch (err) {
+        fieldErr('cw', err.message);
+      }
+      clear.disabled = false;
+    };
   }
 }
 

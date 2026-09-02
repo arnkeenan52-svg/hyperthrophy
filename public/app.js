@@ -25,7 +25,26 @@ const loginStoreQ = STORE_SLUG ? `&store=${encodeURIComponent(STORE_SLUG)}` : ''
 
 const fmtDate = (unix) =>
   new Date(unix * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
-const fmtPrice = (usd) => `$${usd.toFixed(2)}`;
+// The store's currency, learned from /api/plans. Until that lands there is
+// nothing to show a price for, so the initial value is only a safety net.
+let PAGE_CURRENCY = 'usd';
+// Zero-decimal currencies: ¥1500 has no cents to print, and toFixed(2) on one
+// invents a precision the currency does not have. Intl knows the rest —
+// symbol, placement, grouping — so there is no table of those to keep.
+const ZERO_DECIMAL = new Set(['bif', 'clp', 'djf', 'gnf', 'jpy', 'kmf', 'krw', 'mga',
+  'pyg', 'rwf', 'vnd', 'vuv', 'xaf', 'xof', 'xpf', 'isk', 'ugx']);
+const fmtPrice = (amount, cur = PAGE_CURRENCY) => {
+  const c = String(cur ?? PAGE_CURRENCY).toLowerCase();
+  const dp = ZERO_DECIMAL.has(c) ? 0 : 2;
+  try {
+    return new Intl.NumberFormat(undefined, {
+      style: 'currency', currency: c.toUpperCase(),
+      minimumFractionDigits: dp, maximumFractionDigits: dp,
+    }).format(Number(amount));
+  } catch {
+    return `${c.toUpperCase()} ${Number(amount).toFixed(dp)}`;
+  }
+};
 // Product names and usernames are other people's text — escape everything
 // that rides into innerHTML, no exceptions.
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -41,7 +60,13 @@ const ICON_LOCK =
 
 const state = {
   plans: [],
-  capabilities: { stripe: false, crypto: false },
+  capabilities: { stripe: false, crypto: false, nowpayments: false },
+  // Crypto: which coins this store takes, which one the buyer picked, and
+  // the live payment once one exists. `coins: null` means "not asked yet" —
+  // distinct from an empty list, which means "asked, and there are none".
+  coins: null,
+  coin: null,
+  cryptoOrder: null,
   view: 'checkout',
   store: null,
   brand: null,
@@ -198,7 +223,7 @@ function renderBrand() {
   }
   $('#plan-name').textContent = parentOf(plan).name;
   renderTagline($('#plan-desc'), plan.description, plan.descriptionHighlight);
-  $('#price').textContent = fmtPrice(plan.priceUsd);
+  $('#price').textContent = fmtPrice(plan.priceUsd, plan.currency);
   // Roles the buyer receives, as blurple chips — Discord's own concept in
   // Discord's own color.
   const rolesBox = $('#roles-box');
@@ -210,9 +235,11 @@ function renderBrand() {
       rolesBox.hidden = false;
     } else rolesBox.hidden = true;
   }
-  // Discount codes exist on onboarded stores only.
+  // Discount codes exist on onboarded stores only — and once a crypto
+  // payment exists its amount is already quoted on-chain, so a code applied
+  // afterwards could only change a number the buyer is no longer paying.
   const df = $('#discount-field');
-  if (df) df.hidden = !STORE_SLUG;
+  if (df) df.hidden = !STORE_SLUG || Boolean(state.cryptoOrder);
   // Availability + gating, spelled out where the buyer decides. The server
   // enforces both at checkout — these lines just make the page honest.
   const par = parentOf(plan);
@@ -283,6 +310,11 @@ function renderMethods() {
   box.innerHTML = '';
   const methods = [];
   if (state.capabilities.crypto) methods.push({ id: 'coinbase', html: `${ICON_CRYPTO}<span>Crypto</span>` });
+  // The NOWPayments rail. Offered only when the platform has credentials AND
+  // this seller has set a payout wallet — /api/plans folds both into one flag,
+  // because a button that can only answer "this store hasn't finished setting
+  // up" is worse than no button.
+  if (state.capabilities.nowpayments) methods.push({ id: 'crypto', html: `${ICON_CRYPTO}<span>Crypto</span>` });
   if (state.capabilities.stripe) methods.push({ id: 'stripe', html: `${ICON_CARD}<span>Card</span>` });
   if (!methods.some((m) => m.id === state.method)) state.method = methods.at(-1)?.id ?? null;
 
@@ -318,21 +350,79 @@ function renderPayPanel() {
   panel.hidden = false;
 
   const card = state.method === 'stripe';
+  const np = state.method === 'crypto';
   $('#pay-title').textContent = card ? 'Pay with Card' : 'Pay with Crypto';
   $('#pay-sub').textContent = card
     ? 'Secure payment processed by Stripe'
-    : 'Secure payment processed by Coinbase Commerce';
+    : np
+      ? 'Paid on-chain, forwarded straight to the seller'
+      : 'Secure payment processed by Coinbase Commerce';
   $('#trust-row').innerHTML = card
     ? `<span>${ICON_CHECK} Secured by Stripe</span><span>${ICON_LOCK} 100% Secure</span>`
-    : `<span>${ICON_CHECK} Coinbase Commerce</span><span>${ICON_LOCK} 100% Secure</span>`;
+    : np
+      ? `<span>${ICON_CHECK} Roles the moment it confirms</span><span>${ICON_LOCK} 100% Secure</span>`
+      : `<span>${ICON_CHECK} Coinbase Commerce</span><span>${ICON_LOCK} 100% Secure</span>`;
 
+  renderCoinPicker();
   renderCta();
+  renderCryptoPay();
 
   const note = $('#redirect-note');
   const showingPay = Boolean($('#cta-area .pay-btn')) && state.me.loggedIn;
-  note.textContent = showingPay
+  note.textContent = showingPay && !np
     ? `${card ? 'Stripe' : 'Coinbase'}’s secure checkout opens next to finish your payment.`
     : '';
+}
+
+// Which coins this store takes. Read live from the merchant account rather
+// than hardcoded: enabled coins are a per-seller setting that changes without
+// a deploy, and the order they arrive in is cheapest-to-settle first.
+const COIN_LABEL = {
+  btc: 'Bitcoin', eth: 'Ethereum', sol: 'Solana', trx: 'Tron', ltc: 'Litecoin',
+  doge: 'Dogecoin', xrp: 'XRP', ada: 'Cardano', bnb: 'BNB', matic: 'Polygon',
+  pol: 'Polygon', dai: 'DAI', usdterc20: 'USDT · Ethereum', usdttrc20: 'USDT · Tron',
+  usdtsol: 'USDT · Solana', usdtbsc: 'USDT · BNB Chain', usdtmatic: 'USDT · Polygon',
+  usdcerc20: 'USDC · Ethereum', usdcsol: 'USDC · Solana', usdcmatic: 'USDC · Polygon',
+  usdcbase: 'USDC · Base', usdcbsc: 'USDC · BNB Chain',
+};
+const coinLabel = (t) => COIN_LABEL[t] ?? t.toUpperCase();
+
+async function renderCoinPicker() {
+  const box = $('#coinpick');
+  if (!box) return;
+  if (state.method !== 'crypto' || state.cryptoOrder) {
+    box.hidden = true;
+    return;
+  }
+  box.hidden = false;
+  const grid = $('#coinpick-grid');
+  const msg = $('#coinpick-msg');
+  if (state.coins === null) {
+    msg.textContent = 'Loading coins…';
+    state.coins = [];
+    try {
+      const res = await fetch(`/api/checkout/crypto?coins=1&store=${encodeURIComponent(STORE_SLUG)}`);
+      const data = await res.json();
+      state.coins = Array.isArray(data.coins) ? data.coins : [];
+    } catch {
+      state.coins = [];
+    }
+    renderCoinPicker();
+    return;
+  }
+  msg.textContent = state.coins.length ? '' : 'No coins are available for this store right now.';
+  grid.innerHTML = '';
+  for (const ticker of state.coins) {
+    const tile = document.createElement('button');
+    tile.type = 'button';
+    tile.className = `coin${ticker === state.coin ? ' selected' : ''}`;
+    tile.innerHTML = `<b>${ticker.toUpperCase()}</b><span>${coinLabel(ticker)}</span>`;
+    tile.onclick = () => {
+      state.coin = ticker;
+      render();
+    };
+    grid.append(tile);
+  }
 }
 
 // Order-summary rows above the pay action (checkout blueprint): subtotal,
@@ -345,7 +435,7 @@ function renderTotals(plan, applied, payable) {
     return;
   }
   box.hidden = false;
-  $('#tot-sub').textContent = fmtPrice(plan.priceUsd);
+  $('#tot-sub').textContent = fmtPrice(plan.priceUsd, plan.currency);
   const saveRow = $('#tot-save-row');
   if (applied) {
     saveRow.hidden = false;
@@ -393,9 +483,18 @@ function renderCta() {
 
   const applied = state.discount && state.discount.planId === plan.id ? state.discount : null;
   renderTotals(plan, applied, true);
+  // A crypto payment already showing its address is not a thing to start
+  // again — a second invoice for the same order would send the buyer to a
+  // second address and split their payment across two of them.
+  if (state.cryptoOrder) return;
   const btn = document.createElement('button');
   btn.className = 'pay-btn';
-  btn.textContent = `Pay ${fmtPrice(applied ? applied.discountedUsd : plan.priceUsd)} with ${state.method === 'coinbase' ? 'Crypto' : 'Card'}`;
+  const crypto = state.method === 'crypto' || state.method === 'coinbase';
+  btn.textContent = `Pay ${fmtPrice(applied ? applied.discountedUsd : plan.priceUsd)} with ${crypto ? 'Crypto' : 'Card'}`;
+  if (state.method === 'crypto' && !state.coin) {
+    btn.disabled = true;
+    btn.textContent = 'Pick a coin above';
+  }
   btn.onclick = () => pay(btn, plan);
   area.append(btn);
   // One quiet, factual line under the buy action: renewing plans really can
@@ -406,6 +505,194 @@ function renderCta() {
     ? 'One-time payment — no renewals, ever.'
     : 'Cancel anytime from your account.';
   area.append(assure);
+}
+
+// ── the crypto pay screen ────────────────────────────────────────────────────
+//
+// There is no hosted checkout to redirect to: the payment forwards straight
+// to the seller's own wallet, so the address is shown here and this page
+// watches it. Everything below is display — the grant is decided entirely by
+// the signed webhook, never by anything this browser reports.
+
+let cryptoPoll = null;
+
+async function startCryptoPayment(plan, discountCode) {
+  const res = await fetch('/api/checkout/crypto', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      planId: plan.id,
+      payCurrency: state.coin,
+      ...(STORE_SLUG ? { store: STORE_SLUG } : {}),
+      ...(discountCode ? { discountCode } : {}),
+    }),
+  });
+  if (res.status === 401) {
+    window.location.href = `/auth/login?plan=${encodeURIComponent(plan.id)}${loginStoreQ}`;
+    return;
+  }
+  let data = {};
+  try {
+    data = JSON.parse(await res.text());
+  } catch {
+    data = {};
+  }
+  if (!res.ok || !data.payAddress) {
+    throw new Error(data.error || 'The payment did not start. Try again in a moment.');
+  }
+  state.cryptoOrder = data;
+  render();
+  renderCryptoPay();
+  watchCryptoPayment();
+}
+
+function renderCryptoPay() {
+  const box = $('#cryptopay');
+  if (!box) return;
+  const o = state.cryptoOrder;
+  if (!o) {
+    box.hidden = true;
+    stopCryptoClock();
+    return;
+  }
+  box.hidden = false;
+
+  // The QR arrives as SVG markup from our own server — no third-party script
+  // on a payment page, and one implementation rather than one per client.
+  const qr = $('#cryptopay-qr');
+  if (qr) {
+    if (o.qrSvg && qr.dataset.for !== o.orderId) {
+      qr.innerHTML = o.qrSvg;
+      qr.dataset.for = o.orderId;
+    }
+    qr.hidden = !o.qrSvg;
+  }
+
+  const coin = String(o.payCurrency ?? '').toUpperCase();
+  // NOT the usual "any other token is lost forever" line, because on this
+  // account it would be false: wrong-asset deposits are auto-converted, so a
+  // different coin arrives as money — just less of it than the order needs.
+  // The wrong NETWORK is the unrecoverable mistake, and saying both things
+  // accurately is more use to a buyer than one scary sentence that is half
+  // wrong.
+  const warn = $('#cryptopay-warn');
+  if (warn) {
+    warn.innerHTML =
+      `<b>Send ${esc(coin)} on the ${esc(coin)} network only.</b> A transfer sent over a different network cannot be recovered. ` +
+      'Another coin sent to this address is converted at the current rate, which usually leaves the order short of the total.';
+  }
+
+  $('#cryptopay-address').textContent = o.payAddress;
+  $('#cryptopay-coin').textContent = coin;
+  $('#cryptopay-amount').textContent = String(o.payAmount);
+
+  // A memo/tag exists only on some chains, and on those a payment without it
+  // cannot be matched to an order at all — so it is never styled as an
+  // optional extra, and those chains get no QR to scan past it.
+  const memo = $('#cryptopay-memo');
+  if (memo) {
+    memo.hidden = !o.payExtraId;
+    if (o.payExtraId) $('#cryptopay-memo-value').textContent = o.payExtraId;
+  }
+
+  wireCopy('#cryptopay-copy', () => o.payAddress);
+  wireCopy('#cryptopay-copy-amount', () => String(o.payAmount));
+  startCryptoClock(o.expiresAt);
+}
+
+// Copy buttons swap to a tick for a moment. Falls back to selecting the text
+// when the clipboard is refused (an insecure origin, or a denied permission) —
+// silently doing nothing on a page whose whole job is "copy this exactly" is
+// the one outcome worth ruling out.
+function wireCopy(sel, value) {
+  const btn = $(sel);
+  if (!btn) return;
+  btn.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(value());
+      btn.classList.add('done');
+      setTimeout(() => btn.classList.remove('done'), 1600);
+    } catch {
+      const target = btn.parentElement?.querySelector('code');
+      if (target) {
+        const range = document.createRange();
+        range.selectNodeContents(target);
+        const sel2 = window.getSelection();
+        sel2.removeAllRanges();
+        sel2.addRange(range);
+      }
+    }
+  };
+}
+
+// The quoted coin amount is fixed-rate, so it has an expiry. Counting down to
+// it is the difference between "this number is still good" and a buyer sending
+// against a rate that lapsed twenty minutes ago and landing short.
+let cryptoClock = null;
+function stopCryptoClock() {
+  if (cryptoClock) clearInterval(cryptoClock);
+  cryptoClock = null;
+}
+function startCryptoClock(expiresAt) {
+  stopCryptoClock();
+  const el = $('#cryptopay-clock');
+  if (!el) return;
+  const until = expiresAt ? Date.parse(expiresAt) : NaN;
+  if (!Number.isFinite(until)) {
+    el.hidden = true;
+    return;
+  }
+  el.hidden = false;
+  const tick = () => {
+    const left = Math.max(0, Math.floor((until - Date.now()) / 1000));
+    const hh = String(Math.floor(left / 3600)).padStart(2, '0');
+    const mm = String(Math.floor((left % 3600) / 60)).padStart(2, '0');
+    const ss = String(left % 60).padStart(2, '0');
+    el.textContent = `${hh}:${mm}:${ss}`;
+    el.classList.toggle('out', left === 0);
+    if (left === 0) {
+      stopCryptoClock();
+      const t = $('#cryptopay-status-text');
+      // Not "cancelled": the address still works. What lapsed is the quoted
+      // amount, and sending the old figure now is how a buyer underpays.
+      if (t) t.textContent = 'The quoted rate has expired — start the payment again for a fresh amount.';
+    }
+  };
+  tick();
+  cryptoClock = setInterval(tick, 1000);
+}
+
+function watchCryptoPayment() {
+  if (cryptoPoll) clearInterval(cryptoPoll);
+  const order = state.cryptoOrder?.orderId;
+  if (!order) return;
+  const tick = async () => {
+    try {
+      const res = await fetch(`/api/checkout/crypto?store=${encodeURIComponent(STORE_SLUG)}&order=${encodeURIComponent(order)}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      const el = $('#cryptopay-status-text');
+      if (el) el.textContent = data.message ?? 'Waiting for your payment…';
+      if (data.state === 'paid') {
+        clearInterval(cryptoPoll);
+        cryptoPoll = null;
+        stopCryptoClock();
+        // Reload rather than patch the page: the roles, the owned-plan badge
+        // and the account chip all change at once, and the server already
+        // knows the new truth.
+        window.location.href = `/receipt?plan=${encodeURIComponent(state.planId ?? '')}${STORE_SLUG ? `&store=${encodeURIComponent(STORE_SLUG)}` : ''}`;
+      }
+      if (data.state === 'dead') {
+        clearInterval(cryptoPoll);
+        cryptoPoll = null;
+        stopCryptoClock();
+      }
+    } catch {
+      /* a dropped poll is not an error worth showing — the next one retries */
+    }
+  };
+  tick();
+  cryptoPoll = setInterval(tick, 6000);
 }
 
 // The Apply button: confirm the code with the server and show the buyer the
@@ -650,8 +937,19 @@ async function pay(btn, plan) {
   }
   btn.disabled = true;
   const original = btn.textContent;
-  btn.textContent = 'Redirecting…';
   const discountCode = $('#discount-code')?.value.trim() ?? '';
+  if (state.method === 'crypto') {
+    btn.textContent = 'Creating payment…';
+    try {
+      await startCryptoPayment(plan, discountCode);
+    } catch (err) {
+      showPayError(err.message, () => pay(btn, plan));
+      btn.disabled = false;
+      btn.textContent = original;
+    }
+    return;
+  }
+  btn.textContent = 'Redirecting…';
   try {
     const res = await fetch(`/api/checkout/${state.method}`, {
       method: 'POST',
@@ -974,12 +1272,15 @@ function productCard(plan) {
   card.type = 'button';
   card.className = 'prod-card';
   const group = groupFor(plan);
-  const minUsd = Math.min(...group.map((g) => g.priceUsd));
+  // "from" quotes the CHEAPEST option, so the cadence beside it has to be
+  // that same option's — the parent's flag would price a $50/month option as
+  // "from $50.00 lifetime" for a product whose lifetime price is $500.
+  const cheapest = group.reduce((a, b) => (b.priceUsd < a.priceUsd ? b : a), group[0]);
   const priceHtml =
-    group.length > 1 ? `<span class="prod-from">from</span> ${fmtPrice(minUsd)}` : fmtPrice(plan.priceUsd);
+    group.length > 1 ? `<span class="prod-from">from</span> ${fmtPrice(cheapest.priceUsd)}` : fmtPrice(plan.priceUsd);
   // The interval is the same weight and colour as the amount: "$49.99 / month"
   // has to read as one string, not a number with a footnote.
-  const per = plan.lifetime ? ' lifetime' : ` / ${esc(plan.interval ?? 'month')}`;
+  const per = cheapest.lifetime ? ' lifetime' : ` / ${esc(cheapest.interval ?? 'month')}`;
   const now = Math.floor(Date.now() / 1000);
   const roleCount = Array.isArray(plan.roleNames) ? plan.roleNames.length : 0;
   const meta =
@@ -987,15 +1288,21 @@ function productCard(plan) {
     : plan.expiresAt && plan.expiresAt > now ? 'Limited'
     : roleCount ? `${SHOP_ICONS.people}${roleCount} role${roleCount > 1 ? 's' : ''}`
     : '';
+  const ph = `<span class="prod-ph" aria-hidden="true">${esc((plan.name || '?').slice(0, 1).toUpperCase())}</span>`;
   const media = plan.imageUrl
     ? (isVideoMedia(plan)
-        ? `<video class="prod-shot media-fade" src="${esc(plan.imageUrl)}" autoplay muted loop playsinline preload="metadata" aria-hidden="true" onerror="this.remove()" onloadeddata="this.classList.add('loaded')"></video>`
-        : `<img class="prod-shot media-fade" src="${esc(plan.imageUrl)}" alt="" loading="lazy" onerror="this.remove()" onload="this.classList.add('loaded')" />`)
-    : `<span class="prod-ph" aria-hidden="true">${esc((plan.name || '?').slice(0, 1).toUpperCase())}</span>`;
+        ? `<video class="prod-shot media-fade" src="${esc(plan.imageUrl)}" autoplay muted loop playsinline preload="metadata" aria-hidden="true" onloadeddata="this.classList.add('loaded')"></video>`
+        : `<img class="prod-shot media-fade" src="${esc(plan.imageUrl)}" alt="" loading="lazy" onload="this.classList.add('loaded')" />`)
+    : ph;
   card.innerHTML =
     `<span class="prod-media">${media}<span class="prod-name">${esc(plan.name)}</span></span>` +
     `<span class="prod-foot"><span class="prod-price">${priceHtml}<span class="prod-per">${per}</span></span>` +
     `<span class="prod-meta">${meta}</span></span>`;
+  // A dead image URL must not collapse .prod-media to 0px: swap in the same
+  // letter tile the no-image branch uses, so the card keeps its shape and the
+  // absolutely-positioned .prod-name stays inside .prod-card's overflow:hidden.
+  const shot = card.querySelector('.prod-shot');
+  if (shot) shot.onerror = () => { shot.outerHTML = ph; };
   card.onclick = () => openCheckout(plan.id);
   return card;
 }
@@ -1318,6 +1625,10 @@ async function main() {
   }
   const plansBody = await plansRes.json();
   state.plans = plansBody.plans;
+  // Learn the store's currency before anything renders a price. Every plan in
+  // a store shares it, so the first plan answers for the page; the store-level
+  // value is the fallback for a store with nothing for sale yet.
+  PAGE_CURRENCY = String(plansBody.plans?.[0]?.currency ?? plansBody.currency ?? 'usd').toLowerCase();
   state.capabilities = plansBody.capabilities;
   state.server = plansBody.server;
   state.store = plansBody.store ?? null;
@@ -1354,9 +1665,12 @@ async function main() {
   // deep link, a checkout return, or the dashboard preview (?view=checkout)
   // goes straight to the order card. One-PRODUCT stores skip the shop —
   // a product's price options don't count as separate products.
+  // A store with NOTHING sellable (every product paused or expired) is not a
+  // one-product store: state.planId is null exactly then, and the shop's
+  // empty-state copy is the only honest page — never a nameless order card.
   const productCount = state.plans.filter((p) => !p.variantOf).length;
   state.view =
-    !deadProductLink && (requestedPlan || productCount <= 1 || search.get('checkout') || search.get('view') === 'checkout')
+    state.planId && !deadProductLink && (requestedPlan || productCount === 1 || search.get('checkout') || search.get('view') === 'checkout')
       ? 'checkout'
       : 'shop';
   const back = $('#back-to-shop');

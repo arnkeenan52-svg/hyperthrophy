@@ -10,6 +10,7 @@ import { config } from '../config.js';
 import * as db from '../db.js';
 import { openSecret } from '../lib/secretbox.js';
 import { uploadKind } from '../lib/upload.js';
+import { normalize as normalizeCurrency } from '../lib/currency.js';
 
 // The built-in store is NOT special to buyers: it lives at its own slug
 // derived from its brand name (e.g. /tradeleaks), exactly like every other
@@ -41,12 +42,22 @@ export function defaultStore() {
     creatorName: null,
     team: null,
     teamHeading: null,
+    currency: 'usd',
+    // The built-in store has no row, so it has no seller wallet. Present and
+    // null on purpose: `undefined` here reads as "not set" everywhere
+    // downstream by accident rather than by decision.
+    cryptoWallet: null,
+    cryptoChain: null,
     isDefault: true,
   };
 }
 
 function hydrate(row) {
   if (!row) return null;
+  // Decrypted once. null here means the row HAS a sealed key and it will not
+  // open — a rotated SECRET_KEY — which is a different state from "no key",
+  // and one the checkout must refuse rather than paper over.
+  const ownKey = row.stripe_secret_enc ? openSecret(row.stripe_secret_enc) : null;
   return {
     id: row.id,
     slug: row.slug,
@@ -55,7 +66,8 @@ function hydrate(row) {
     bannerUrl: row.banner_url ?? null,
     ownerDiscordId: row.owner_discord_id,
     guildId: row.guild_id,
-    stripeKey: row.stripe_secret_enc ? openSecret(row.stripe_secret_enc) : config.stripe.secretKey,
+    stripeKey: row.stripe_secret_enc ? ownKey : config.stripe.secretKey,
+    stripeKeyBroken: Boolean(row.stripe_secret_enc) && ownKey === null,
     // Whether this store has a key OF ITS OWN. stripeKey above falls back to
     // the platform's, so it can never answer "has the seller connected
     // Stripe?" — and the setup checklist needs exactly that question. A
@@ -72,6 +84,16 @@ function hydrate(row) {
     category: row.category ?? null,
     reviewsOn: Boolean(Number(row.reviews_on ?? 0)),
     creatorName: row.creator_name ?? null,
+    // The currency this store prices in. Normalised on the way out so a row
+    // written before the column existed, or hand-edited to something Stripe
+    // does not accept, degrades to USD rather than reaching the charge path.
+    currency: normalizeCurrency(row.currency),
+    // The seller's OWN crypto payout address and the network it is on. Null
+    // is the honest answer for a store that has not set one, and the crypto
+    // checkout refuses to start rather than let a payment settle anywhere
+    // but here.
+    cryptoWallet: row.crypto_wallet ?? null,
+    cryptoChain: row.crypto_chain ?? null,
     // Seller-authored, same storage idiom as links. A row written before this
     // column existed parses as null, not as a crash.
     team: row.team ? JSON.parse(row.team) : null,
@@ -233,6 +255,9 @@ export async function plansOf(store) {
   if (store.isDefault) return config.plans;
   const plans = (await db.storePlansFor(store.id)).map((p) => ({
     id: p.planKey,
+    // The plan id is only unique WITHIN a store. Anything that keys a cache
+    // on a plan has to key it on this too.
+    storeId: store.id,
     name: p.name,
     description: p.description ?? '',
     descriptionHighlight: null,
@@ -240,6 +265,10 @@ export async function plansOf(store) {
     mediaKind: p.mediaKind ?? null,
     roleNames: p.roleNames,
     priceUsd: p.priceUsd,
+    // The currency the price is in. Read off the plan row, not the store, so a
+    // store that changes currency cannot retroactively re-denominate the
+    // products it already sold under the old one.
+    currency: normalizeCurrency(p.currency ?? store.currency),
     interval: p.lifetime ? 'lifetime' : 'month',
     lifetime: p.lifetime,
     durationDays: p.durationDays,

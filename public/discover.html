@@ -12,17 +12,24 @@
   <meta property="og:locale" content="en_US" />
   <meta property="og:title" content="Discover Discord communities — Dues" />
   <meta property="og:description" content="Browse paid Discord communities. Stripe checkout, roles in seconds." />
-  <link rel="icon" href="/favicon.ico" sizes="32x32" />
+  <link rel="icon" href="/favicon.ico" sizes="48x48 96x96" />
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-  <link rel="icon" type="image/png" sizes="96x96" href="/favicon-96x96.png?v=194" />
-  <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=194" />
+  <link rel="icon" type="image/png" sizes="96x96" href="/favicon-96x96.png" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
   <link rel="manifest" href="/site.webmanifest" />
-  <link rel="stylesheet" href="/styles.css?v=194" />
+  <link rel="stylesheet" href="/styles.css?v=195" />
   <style>
 /* day-sky theme — overrides the monochrome tokens in styles.css (all states) */
 :root, :root[data-theme='light'], :root[data-theme='dark'] {
   color-scheme: light;
   --bg: #f4f8fd;
+  /* iOS paints the strips behind its own bars by sampling a fixed element at
+     each viewport edge — .ui-tint and .ui-tint-b in styles.css. This page is
+     SKY at the top and PAPER below, so the two edges are different colours,
+     and the single value they used to share is what put a band of sky blue
+     under a near-white footer at the bottom of the page. */
+  --ui-tint: #70a3e6;
+  --ui-tint-b: #f4f8fd;
   --panel: rgba(255,255,255,.62);
   --panel-hover: rgba(255,255,255,.86);
   --edge: rgba(255,255,255,.75);
@@ -122,17 +129,19 @@ body.home .disc-hero .kicker { color: rgba(15,22,38,.72); }
 /* search box as glass (discover) */
 .search-box { background: rgba(255,255,255,.62); border-color: rgba(255,255,255,.75); }
 </style>
-  <script src="/theme.js?v=194"></script>
+  <script src="/theme.js?v=195"></script>
 </head>
 <body class="home">
+<i class="ui-tint" aria-hidden="true"></i>
+<i class="ui-tint-b" aria-hidden="true"></i>
   <header class="top xoe-nav">
     <div class="top-left">
-      <a href="/"><img class="platform-mark" src="/dues.png?v=194" alt="Dues" height="20" /></a>
+      <a href="/"><img class="platform-mark" src="/dues.png?v=195" alt="Dues" height="20" /></a>
     </div>
     <nav class="top-center" aria-label="Main">
       <a class="nav-link" href="/discover" aria-current="page">Discover</a>
-      <a class="nav-link" href="/#features">Features</a>
-      <a class="nav-link" href="/#pricing">Pricing</a>
+      <a class="nav-link" href="/#how">Features</a>
+      <a class="nav-link" href="/pricing">Pricing</a>
       <a class="nav-link" href="/vs">Compare</a>
     </nav>
     <div class="top-right">
@@ -147,8 +156,8 @@ body.home .disc-hero .kicker { color: rgba(15,22,38,.72); }
   <div class="menu-scrim" id="menu-scrim" hidden aria-hidden="true"></div>
   <nav class="mobile-menu" id="mobile-menu" hidden aria-label="Menu">
     <a href="/discover">Discover</a>
-    <a href="/#features">Features</a>
-    <a href="/#pricing">Pricing</a>
+    <a href="/#how">Features</a>
+    <a href="/pricing">Pricing</a>
     <a href="/vs">Compare</a>
     <div class="mobile-menu-account" id="menu-account"></div>
   </nav>
@@ -180,18 +189,18 @@ body.home .disc-hero .kicker { color: rgba(15,22,38,.72); }
 
   <footer class="site-footer cols seo-footer">
     <div class="footer-brand">
-      <img class="powered-mark" src="/dues.png?v=194" alt="Dues" height="16" />
+      <img class="powered-mark" src="/dues.png?v=195" alt="Dues" height="16" />
       <span class="footer-copy">© Dues</span>
     </div>
     <nav class="footer-col"><span class="footer-head">Product</span>
-      <a href="/discover">Discover</a><a href="/#features">Features</a><a href="/#pricing">Pricing</a><a href="/dashboard">Dashboard</a></nav>
+      <a href="/discover">Discover</a><a href="/#how">Features</a><a href="/pricing">Pricing</a><a href="/dashboard">Dashboard</a><a href="mailto:contact@dues.gg">contact@dues.gg</a></nav>
     <nav class="footer-col"><span class="footer-head">Compare</span>
       <a href="/vs">All comparisons</a><a href="/guides">Guides</a><a href="/alternatives">Alternatives</a></nav>
     <nav class="footer-col"><span class="footer-head">Legal</span><a href="/terms">Terms</a><a href="/privacy">Privacy</a></nav>
     <p class="footer-disclaimer">Every community listed here chose to be listed. Payments are processed by Stripe on each store owner's own account — Dues never holds funds.</p>
   </footer>
 
-  <script src="/menu.js?v=194"></script>
-  <script src="/discover.js?v=194"></script>
+  <script src="/menu.js?v=195"></script>
+  <script src="/discover.js?v=195"></script>
 </body>
 </html>

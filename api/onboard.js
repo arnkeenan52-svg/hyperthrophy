@@ -9,6 +9,7 @@ import { getUserGuilds, getGuild, getGuildRoles, getBotUser, getGuildMember, get
 import { stripeFetch, createWebhookEndpoint, canonicalWebhookUrl, invalidatePriceCache, isStripeKey, stripeKeyMode } from '../src/lib/stripe.js';
 import { managedStoreByGuild, storeBySlug, slugify, isReservedSlug, plansOf, rebaseImageUrl } from '../src/services/stores.js';
 import { parseUploadDataUrl, UPLOAD_BODY_LIMIT } from '../src/lib/upload.js';
+import { validateAmount, roundAmount, toMinor, formatAmount, minCharge, maxCharge, normalize as normalizeCurrency } from '../src/lib/currency.js';
 
 const ADMINISTRATOR = 1n << 3n;
 const MANAGE_GUILD = 1n << 5n;
@@ -38,7 +39,15 @@ async function callerManagesGuild(uid, guildId) {
 }
 
 async function ownedStore(uid, storeId, req) {
-  const row = await db.getStoreById(Number(storeId));
+  // An integer or nothing. Number(undefined) is NaN, and the two storage
+  // engines disagree about NaN as a bound parameter: SQLite binds it as NULL
+  // and finds no row (a clean 403); Postgres rejects it and the handler 500s.
+  // The suite runs on SQLite, which is why it never saw production do this.
+  const id = Number(storeId);
+  // Safe integers only: pg serialises 1e21 as "1e+21" and 2^63 past bigint's
+  // range, and both surface as a 500 instead of this 403. isInteger let them by.
+  if (!Number.isSafeInteger(id) || id <= 0) return null;
+  const row = await db.getStoreById(id);
   if (!row) return null;
   // The platform operator can act on any store — same bypass the sibling
   // admin endpoints grant, so the Platform admin view is fully functional.
@@ -157,12 +166,18 @@ export default guard(async function handler(req, res) {
       if (!row) return sendJson(res, 403, { error: 'not your store' });
       const name = String(body.name ?? '').trim().slice(0, 80);
       const description = String(body.description ?? '').trim().slice(0, 300);
-      const priceUsd = Math.round(Number(body.priceUsd) * 100) / 100;
+      // Priced in the store's own currency, and checked against Stripe's real
+      // limits for it. A 500 JPY product and a 20,000,000 IDR one are both
+      // ordinary, and the old flat $1–$10,000 rule refused each of them.
+      const currency = normalizeCurrency(row.currency);
+      const priceUsd = roundAmount(Number(body.priceUsd), currency);
       const lifetime = body.lifetime !== false;
       const durationDays = lifetime ? null : Math.max(1, Math.min(366, Math.round(Number(body.durationDays ?? 31))));
       if (!name) return sendJson(res, 400, { error: 'Name your product.' });
-      if (!Number.isFinite(priceUsd) || priceUsd < 1 || priceUsd > 10000) {
-        return sendJson(res, 400, { error: 'Price must be between $1 and $10,000.' });
+      if (!validateAmount(priceUsd, currency).ok) {
+        return sendJson(res, 400, {
+          error: `Price must be between ${formatAmount(minCharge(currency), currency)} and ${formatAmount(maxCharge(currency), currency)}.`,
+        });
       }
       // Photo: an uploaded data URL (dashboard photo picker) wins over a
       // pasted link. It is stored on the row and served from /api/img.
@@ -198,8 +213,8 @@ export default guard(async function handler(req, res) {
             ...(description ? { description } : {}),
             ...(imageUrl?.startsWith('https://') ? { images: [imageUrl] } : {}),
             default_price_data: {
-              currency: 'usd',
-              unit_amount: Math.round(priceUsd * 100),
+              currency,
+              unit_amount: toMinor(priceUsd, currency),
               ...(lifetime ? {} : { recurring: { interval: 'month' } }),
             },
           },
@@ -215,6 +230,7 @@ export default guard(async function handler(req, res) {
         description,
         imageUrl,
         priceUsd,
+        currency,
         lifetime,
         durationDays,
         stripePriceId: typeof product.default_price === 'string' ? product.default_price : product.default_price?.id ?? null,
@@ -243,9 +259,12 @@ export default guard(async function handler(req, res) {
       }
       const lifetime = body.lifetime !== false;
       const durationDays = lifetime ? null : Math.max(1, Math.min(366, Math.round(Number(body.durationDays ?? 31))));
-      const priceUsd = Math.round(Number(body.priceUsd) * 100) / 100;
-      if (!Number.isFinite(priceUsd) || priceUsd < 1 || priceUsd > 10000) {
-        return sendJson(res, 400, { error: 'Price must be between $1 and $10,000.' });
+      const currency = normalizeCurrency(row.currency);
+      const priceUsd = roundAmount(Number(body.priceUsd), currency);
+      if (!validateAmount(priceUsd, currency).ok) {
+        return sendJson(res, 400, {
+          error: `Price must be between ${formatAmount(minCharge(currency), currency)} and ${formatAmount(maxCharge(currency), currency)}.`,
+        });
       }
       const label = String(body.label ?? '').trim().slice(0, 40) || (lifetime ? 'Lifetime' : 'Monthly');
       let planKey = `${parentKey}-${slugify(label)}`.slice(0, 60);
@@ -269,8 +288,8 @@ export default guard(async function handler(req, res) {
             name: `${parent.name} — ${label}`,
             ...(parent.description ? { description: parent.description } : {}),
             default_price_data: {
-              currency: 'usd',
-              unit_amount: Math.round(priceUsd * 100),
+              currency,
+              unit_amount: toMinor(priceUsd, currency),
               ...(lifetime ? {} : { recurring: { interval: 'month' } }),
             },
           },
@@ -286,6 +305,7 @@ export default guard(async function handler(req, res) {
         description: null,
         imageUrl: null,
         priceUsd,
+        currency,
         lifetime,
         durationDays,
         stripePriceId: typeof product.default_price === 'string' ? product.default_price : product.default_price?.id ?? null,
@@ -504,9 +524,12 @@ export default guard(async function handler(req, res) {
         }
       }
       if (body.priceUsd !== undefined) {
-        const priceUsd = Math.round(Number(body.priceUsd) * 100) / 100;
-        if (!Number.isFinite(priceUsd) || priceUsd < 1 || priceUsd > 10000) {
-          return sendJson(res, 400, { error: 'Price must be between $1 and $10,000.' });
+        const currency = normalizeCurrency(existing.currency);
+        const priceUsd = roundAmount(Number(body.priceUsd), currency);
+        if (!validateAmount(priceUsd, currency).ok) {
+          return sendJson(res, 400, {
+            error: `Price must be between ${formatAmount(minCharge(currency), currency)} and ${formatAmount(maxCharge(currency), currency)}.`,
+          });
         }
         if (priceUsd !== existing.priceUsd) {
           fields.priceUsd = priceUsd;
@@ -536,6 +559,19 @@ export default guard(async function handler(req, res) {
       // Deleting a product takes its price options with it — an option
       // without its product is unreachable and must not linger half-alive.
       const variants = plan.variantOf ? [] : (await db.storePlansFor(row.id)).filter((p) => p.variantOf === planKey);
+      // "Buyers keep what they already bought" is what the confirm dialog
+      // promises, and it has to be true. rolePlanFor builds the role map from
+      // the plan rows that EXIST, so deleting a row that live subscriptions
+      // still point at means the next reconcile finds no roles for those
+      // members and takes theirs away — and for a recurring product, Stripe
+      // keeps billing them for it. Refuse while anyone holds it. Deactivating
+      // is the right verb there: it stops the sale and keeps their access.
+      const holders = await db.countLiveSubscriptionsForPlans(row.id, [plan.planKey, ...variants.map((v) => v.planKey)]);
+      if (holders > 0) {
+        return sendJson(res, 409, {
+          error: `${holders} member${holders === 1 ? ' still holds' : 's still hold'} this product. Deactivate it instead — that stops the sale and keeps their access.`,
+        });
+      }
       for (const target of [plan, ...variants]) {
         // Best-effort archive on their Stripe so the product stops being
         // sellable there too — the local delete is what gates checkout.
