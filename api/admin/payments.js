@@ -11,8 +11,8 @@ import { canCustomise } from '../../src/services/billing.js';
 // Amounts come from each store's plan catalog (what checkout charges);
 // refunds made in the Stripe dashboard are not tracked here.
 export default guard(async function handler(req, res) {
-  const uid = sessionUserId(req);
-  const platformAdmin = ownerAuthorized(req) || cronAuthorized(req);
+  const uid = await sessionUserId(req);
+  const platformAdmin = await ownerAuthorized(req) || cronAuthorized(req);
   if (!platformAdmin && !uid) {
     sendJson(res, 401, { error: 'sign in first' });
     return;
@@ -82,6 +82,19 @@ export default guard(async function handler(req, res) {
       status: s.status,
       entitled: isEntitled(s),
       lifetime: s.status === 'active' && s.current_period_end === null,
+      // The term the row renews on, so the dashboard can state a yearly or
+      // weekly plan's MONTHLY rate instead of counting its period price as MRR.
+      // Preferably the plan's, but a deleted plan (deleteStorePlan is a hard
+      // DELETE) takes its term with it while its members keep running — and a
+      // missing term reads as "monthly", which booked a $600 yearly member as
+      // $600 of MRR. The row carries the term it was sold on for exactly that.
+      durationDays: plan?.durationDays ?? (s.duration_days === null || s.duration_days === undefined ? null : Number(s.duration_days)),
+      // Only a card subscription bills again: Stripe runs term plans in
+      // subscription mode. A crypto purchase is a fixed term that simply ends
+      // (/account tells the buyer so) and a manual grant was never charged, so
+      // neither is RECURRING revenue — counted as MRR, a crypto-heavy store
+      // shows a figure that falls to zero on its own at term end.
+      renews: s.provider === 'stripe' && !(s.status === 'active' && s.current_period_end === null),
     });
   }
 

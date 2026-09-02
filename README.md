@@ -19,6 +19,9 @@ npm test                 # e2e suite against mock Stripe/Coinbase/Discord (SQLit
 E2E_DATABASE_URL=postgres://… npm test   # same suite against real Postgres
 npm run migrate          # create tables against DATABASE_URL / DB_PATH
 npm run doctor           # LIVE-verify the whole setup before taking money
+npm run test:footer      # phone footer, measured headlessly at iPhone viewports
+npm run baseline:dash    # dashboard layout harness: record 243 states BEFORE a change…
+npm run test:dash        # …and diff against them after (baseline is local, see the file)
 ```
 
 Products live in `plans.json` — id, name, description, price, Stripe price
@@ -59,7 +62,10 @@ id, and the Discord role ids each plan grants. The live catalog is a single
   exact bytes sent; a parsed-and-reserialised body would fail verification.
 - **Routing**: `vercel.json` rewrites keep the public URLs stable —
   `/auth/login`, `/auth/callback`, `/auth/logout`, `/webhooks/stripe`,
-  `/webhooks/coinbase` map onto the corresponding `api/` functions.
+  `/webhooks/coinbase` map onto the corresponding `api/` functions. The
+  same file 301s the old domain (`ripleybot.com`, `www.ripleybot.com`) to
+  `https://dues.gg` with the path kept; that only takes effect once the old
+  domain is attached to the project in Vercel → Settings → Domains.
 - **Stripe-only capability flag**: crypto is live only when
   `COINBASE_API_KEY` + `COINBASE_WEBHOOK_SECRET` are set. Without them the
   storefront hides the crypto CTA and the coinbase endpoints answer 501 —
@@ -95,6 +101,18 @@ id, and the Discord role ids each plan grants. The live catalog is a single
    ```
 
    and fix anything it flags (see below).
+
+## Marketing pages are generated, not hand-written
+
+`/vs/*`, `/tools/*`, `/use-cases/*`, `/guides/*`, `/alternatives/*`, `/help`,
+`llms.txt`, `sitemap.xml` and `robots.txt` are emitted by
+`node scripts/gen-seo-pages.mjs` into `public/` and **committed** — Vercel
+serves `public/` as-is, so the run has to happen before the commit, not at
+deploy time. The generator reads `config.communityInvite`, so re-issuing the
+community invite is: set `COMMUNITY_INVITE`, which immediately moves the
+`/api/community` hop and the receipt email, then regenerate and commit to move
+the footer link on the 45 generated pages. `npm test` fails if the shipped
+pages and the config value disagree.
 
 ## Setup doctor
 
@@ -168,6 +186,43 @@ role delivery and receipts keep working, the bot just greys out.
 identifies with the presence payload, heartbeats, resumes the same session
 after the gateway drops it, and exits non-zero on a 4004 auth failure.
 
+### Welcome cards, and why they stop
+
+The same worker posts a branded join card in the Dues community server when
+`WELCOME_CHANNEL_ID` and `WELCOME_GUILD_ID` are set (one server only — a join
+in a seller's server never triggers a Dues card). **Three things have to be
+true at once**, and if any one of them is false the cards go quiet with no
+error anywhere a person would look:
+
+1. **The worker is running somewhere that holds a socket.** Vercel cannot —
+   a serverless function has no long-lived connection, so nothing on the web
+   deployment can ever post a card. It has to be the Railway/Fly/VPS worker,
+   and it has to be up.
+2. **The Server Members intent is on.** Developer Portal → your app → Bot →
+   Privileged Gateway Intents → **Server Members Intent** → Save. Without it
+   Discord refuses the worker's connection with close code 4014 the moment
+   cards are enabled — the bot does not even go Online, let alone see a join.
+3. **Both ids are set on the worker**, `WELCOME_GUILD_ID` and
+   `WELCOME_CHANNEL_ID`, and the bot can post in that channel: View Channel,
+   Send Messages, **Attach Files** and Embed Links. The card is an upload, so
+   without Attach Files Discord refuses the whole message.
+
+Rather than guess which one it is:
+
+```bash
+DISCORD_BOT_TOKEN=... WELCOME_GUILD_ID=... WELCOME_CHANNEL_ID=... npm run doctor:welcome
+```
+
+It checks all of them over plain REST — no gateway, no deploy, nothing
+changed — and prints a numbered verdict with the exact fix for whatever is
+wrong, exiting non-zero if anything is. Add `--post` and it sends one real
+test card to that channel, so you can see the thing itself land. It never
+prints the token, and takes it the same way `setup-community.mjs` does
+(`DISCORD_BOT_TOKEN`, `/etc/ripley/presence.env`, or a hidden prompt).
+
+If every check passes and cards still do not appear, it is number 1: the
+worker is not running. Look for `online as <bot>` in its log.
+
 ### Running it free, on a VM that stays up
 
 Measured footprint: ~60 MB RSS, ~195 KB/day of traffic, effectively no CPU.
@@ -207,7 +262,10 @@ it with `systemctl status ripley-presence` and
 
 The VM needs no inbound firewall rule — the gateway connection is outbound
 only, and nothing else from this repo has to run there. `presence.js` has no
-dependencies, so those two files are the entire payload.
+dependencies, so those two files are the entire payload — which also means
+this route cannot post welcome cards: the renderer needs `sharp`, the brand
+fonts and `assets/`. Use `Dockerfile.presence` (Railway, Fly) for a worker
+that does both.
 
 ## Buyer self-service
 
@@ -330,8 +388,16 @@ Three provider behaviours the code is built around:
 
 The IPN carries no timestamp or nonce, so there is nothing to bound a replay
 against: the webhook re-reads the payment from the API and acts on its current
-state, and claims idempotency on `payment_id:payment_status` (keying on the id
-alone would let the first `waiting` delivery swallow the `finished` one).
+state. Idempotency is claimed on the **work**, not the delivery —
+`payment_id:finished`, taken once the re-read says finished and retakeable
+after five minutes if the order is still open (an invocation killed mid-grant)
+— so several deliveries that all re-read `finished` grant, count the discount
+and ping the seller exactly once. A delivery that says `finished` while the
+re-read has not caught up is answered 503 so the provider brings it back; a
+200 there would have consumed the only `finished` the payment ever sends. The
+hourly cron backstops lost IPNs: every open crypto order older than an hour is
+looked up at the provider, a finished one is processed through the same
+handler, an expired one is closed.
 Payout addresses are checksum-validated per chain — EIP-55, base58check with
 version bytes, bech32/bech32m — and typed twice before they will save.
 

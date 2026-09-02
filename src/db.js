@@ -5,6 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { config } from './config.js';
+import { sealSecret, openSecret } from './lib/secretbox.js';
 
 // Schema is identical across dialects; only the id autoincrement spelling and
 // the integer width differ. current_period_end IS NULL means LIFETIME and
@@ -18,6 +19,7 @@ const ddl = (dialect) => {
     username      TEXT,
     access_token  TEXT,
     refresh_token TEXT,
+    session_gen   ${int} NOT NULL DEFAULT 0,  -- bumped to revoke every session cookie at once
     created_at    ${int} NOT NULL,
     updated_at    ${int} NOT NULL
   );
@@ -34,6 +36,7 @@ const ddl = (dialect) => {
     current_period_end ${int},
     grace_until   ${int},
     cancels_at    ${int},               -- set when the buyer cancels; access runs to here
+    duration_days ${int},               -- the term this sale was made on; NULL for lifetime and for rows sold before this column
     created_at    ${int} NOT NULL,
     updated_at    ${int} NOT NULL,
     UNIQUE (provider, provider_ref)
@@ -90,7 +93,8 @@ const ddl = (dialect) => {
     currency      TEXT NOT NULL DEFAULT 'usd',
     discount_code TEXT,
     provider_ref  TEXT,                 -- crypto: the NOWPayments payment id
-    status        TEXT NOT NULL,        -- 'started' | 'completed'
+    expires_at    ${int},               -- when the provider stops taking money for it; NULL = the card-form TTL
+    status        TEXT NOT NULL,        -- 'started' | 'completed' | 'expired' (crypto: the provider closed the invoice unpaid) | 'undelivered' (crypto: the money landed and could not be delivered)
     created_at    ${int} NOT NULL,
     completed_at  ${int},
     UNIQUE (session_id)
@@ -193,6 +197,21 @@ const ddl = (dialect) => {
     UNIQUE (store_id, code)
   );
 
+  -- One row per REFUSED discount-code preview. A 200-or-404 answer with no
+  -- login is an oracle, so misses are budgeted per asker — and the budget
+  -- lives here rather than in a module-level Map because this ships as
+  -- serverless functions: per-process state is a fresh budget on every
+  -- instance and on every cold start, which is no budget at all. Rows older
+  -- than the window are deleted as they are written.
+  CREATE TABLE IF NOT EXISTS discount_misses (
+    ${id},
+    asker    TEXT NOT NULL,       -- 'u:<discord id>' when signed in, else 'ip:<address>'
+    store    TEXT NOT NULL,       -- store slug, for the "someone is walking this store" signal
+    at       ${int} NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_discount_misses_asker ON discount_misses (asker, at);
+  CREATE INDEX IF NOT EXISTS idx_discount_misses_at ON discount_misses (at);
+
   -- Small runtime key/value store. Holds the signing secret of the Stripe
   -- webhook endpoint the doctor registers automatically (the deployed
   -- filesystem and env are read-only at runtime), plus short-lived locks.
@@ -241,16 +260,44 @@ async function createDriver() {
     // Serverless functions are single-request; keep the pool tiny and let the
     // platform's connection pooler (Neon/Supabase pgbouncer URL) do the rest.
     const pool = new pg.Pool({ connectionString: config.databaseUrl, max: 3 });
+    const run = async (client, sql, params = []) => {
+      let i = 0;
+      const text = sql.replace(/\?/g, () => `$${++i}`);
+      const r = await client.query(text, params);
+      return { rows: r.rows, changes: r.rowCount ?? 0 };
+    };
     return {
       dialect: 'pg',
       async query(sql, params = []) {
-        let i = 0;
-        const text = sql.replace(/\?/g, () => `$${++i}`);
-        const r = await pool.query(text, params);
-        return { rows: r.rows, changes: r.rowCount ?? 0 };
+        return run(pool, sql, params);
       },
       async exec(sql) {
         await pool.query(sql);
+      },
+      // A critical section for the one thing a single statement cannot do:
+      // count rows and then write one only if the count allows it. READ
+      // COMMITTED gives each statement its own snapshot and there is no row to
+      // lock for a purchase that has not been reserved yet, so two checkouts
+      // for the last seat both counted zero and both got in. The lock is
+      // transaction-scoped — COMMIT, ROLLBACK, or a dropped connection all
+      // release it, so a killed invocation can never leave a store unable to
+      // sell — and it is an advisory lock rather than a session one because
+      // the platform's connection pooler hands out connections per
+      // transaction.
+      async serialized(key, fn) {
+        const client = await pool.connect();
+        try {
+          await client.query('BEGIN');
+          await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [key]);
+          const out = await fn({ query: (sql, params) => run(client, sql, params) });
+          await client.query('COMMIT');
+          return out;
+        } catch (err) {
+          await client.query('ROLLBACK').catch(() => {});
+          throw err;
+        } finally {
+          client.release();
+        }
       },
     };
   }
@@ -260,16 +307,48 @@ async function createDriver() {
   const sqlite = new DatabaseSync(config.dbPath);
   sqlite.exec('PRAGMA journal_mode = WAL');
   sqlite.exec('PRAGMA busy_timeout = 5000');
+  const query = async (sql, params = []) => {
+    const stmt = sqlite.prepare(sql);
+    if (/^\s*select/i.test(sql)) return { rows: stmt.all(...params), changes: 0 };
+    const info = stmt.run(...params);
+    return { rows: [], changes: Number(info.changes) };
+  };
+  // One connection, one transaction at a time: node:sqlite runs statements
+  // synchronously, but the callback below awaits, so without this queue a
+  // second reservation could open its own BEGIN inside the first one's.
+  // BEGIN IMMEDIATE takes the file's write lock, so another PROCESS on the
+  // same database waits for it too (busy_timeout above).
+  let queue = Promise.resolve();
   return {
     dialect: 'sqlite',
-    async query(sql, params = []) {
-      const stmt = sqlite.prepare(sql);
-      if (/^\s*select/i.test(sql)) return { rows: stmt.all(...params), changes: 0 };
-      const info = stmt.run(...params);
-      return { rows: [], changes: Number(info.changes) };
-    },
+    query,
     async exec(sql) {
       sqlite.exec(sql);
+    },
+    // The key is a Postgres lock id and has no use here: one connection with
+    // one transaction at a time already serializes every caller.
+    async serialized(key, fn) {
+      const run = async () => {
+        sqlite.exec('BEGIN IMMEDIATE');
+        try {
+          const out = await fn({ query });
+          sqlite.exec('COMMIT');
+          return out;
+        } catch (err) {
+          try {
+            sqlite.exec('ROLLBACK');
+          } catch {
+            /* the transaction is already gone */
+          }
+          throw err;
+        }
+      };
+      const next = queue.then(run, run);
+      queue = next.then(
+        () => {},
+        () => {},
+      );
+      return next;
     },
   };
 }
@@ -313,6 +392,13 @@ function db() {
       // What the buyer actually paid (post-discount) — display surfaces
       // prefer this over the plan's list price when present.
       await driver.exec('ALTER TABLE subscriptions ADD COLUMN paid_usd REAL').catch(onlyDuplicateColumn);
+      // The term the sale was made on. The plan catalog is the source while
+      // the plan exists, but deleteStorePlan is a hard DELETE and its members
+      // keep running — and the dashboard reads a missing term as "monthly",
+      // which booked a deleted yearly plan's members at twelve times their
+      // real monthly rate. Pre-existing rows stay NULL and keep pricing off
+      // the catalog, exactly as before.
+      await driver.exec(`ALTER TABLE subscriptions ADD COLUMN duration_days ${intType}`).catch(onlyDuplicateColumn);
       // Store-page customization: long about text, social links (JSON of
       // known keys), and the opt-in live member-count badge.
       await driver.exec('ALTER TABLE stores ADD COLUMN about TEXT').catch(onlyDuplicateColumn);
@@ -375,6 +461,20 @@ function db() {
       // ourselves, so the payment id it maps to needs somewhere to live —
       // it is what the buyer's pay screen re-reads status from.
       await driver.exec('ALTER TABLE checkout_attempts ADD COLUMN provider_ref TEXT').catch(onlyDuplicateColumn);
+      // How long an open attempt holds its seat and its discount use. A card
+      // form dies with its Stripe session, so those rows leave this NULL and
+      // age out on created_at; a crypto invoice stays payable for as long as
+      // the provider would still settle it — days, not minutes — so the row
+      // carries that date.
+      await driver.exec(`ALTER TABLE checkout_attempts ADD COLUMN expires_at ${intType}`).catch(onlyDuplicateColumn);
+      // When the crypto cron last asked the provider about an open order. It
+      // orders the batch, so an order the provider never advances (an
+      // underpayment sits at `partially_paid` for the whole seven-day window)
+      // takes its turn instead of holding the head of the queue for ever.
+      await driver.exec(`ALTER TABLE checkout_attempts ADD COLUMN provider_checked_at ${intType}`).catch(onlyDuplicateColumn);
+      // Session revocation: the cookie carries the generation it was issued
+      // under and is refused once the row has moved past it (src/lib/session.js).
+      await driver.exec(`ALTER TABLE users ADD COLUMN session_gen ${intType} NOT NULL DEFAULT 0`).catch(onlyDuplicateColumn);
       return driver;
     })().catch((err) => {
       driverPromise = null; // a failed init must not poison every later request
@@ -393,6 +493,17 @@ const now = () => Math.floor(Date.now() / 1000);
 
 // ── users ─────────────────────────────────────────────────────────────────────
 
+// OAuth tokens sit beside the sealed Stripe keys and get the same box: the
+// scopes are `identify guilds guilds.join`, so a database-only leak (a
+// backup, a read-only credential) must not hand out a token that lists
+// every seller's servers and adds accounts to them. Sealed on write, opened
+// on read. A row written before sealing still holds cleartext and reads
+// as-is until the next sign-in rewrites it; a sealed value that no longer
+// opens (SESSION_SECRET rotated) reads as no token, which every caller
+// already answers with "sign in again".
+const sealToken = (v) => (v == null ? null : sealSecret(v));
+const openToken = (v) => (v == null ? null : String(v).startsWith('v1.') ? openSecret(v) : v);
+
 export async function upsertUser({ discordId, username, accessToken = null, refreshToken = null }) {
   await q(
     `INSERT INTO users (discord_id, username, access_token, refresh_token, created_at, updated_at)
@@ -402,13 +513,29 @@ export async function upsertUser({ discordId, username, accessToken = null, refr
        access_token = COALESCE(excluded.access_token, users.access_token),
        refresh_token = COALESCE(excluded.refresh_token, users.refresh_token),
        updated_at = excluded.updated_at`,
-    [discordId, username ?? null, accessToken, refreshToken, now(), now()],
+    [discordId, username ?? null, sealToken(accessToken), sealToken(refreshToken), now(), now()],
   );
 }
 
 export async function getUser(discordId) {
   const { rows } = await q('SELECT * FROM users WHERE discord_id = ?', [discordId]);
-  return rows[0] ?? null;
+  const row = rows[0];
+  if (!row) return null;
+  return { ...row, access_token: openToken(row.access_token), refresh_token: openToken(row.refresh_token) };
+}
+
+// The generation every live session cookie for this user must carry; null
+// when there is no such user (a cookie for a deleted row must not pass).
+export async function sessionGeneration(discordId) {
+  const { rows } = await q('SELECT session_gen FROM users WHERE discord_id = ?', [discordId]);
+  return rows[0] ? Number(rows[0].session_gen ?? 0) : null;
+}
+
+// "Log out everywhere": every cookie issued under the old generation is dead
+// from here on. Returns the new generation so the caller can be re-issued.
+export async function bumpSessionGeneration(discordId) {
+  await q('UPDATE users SET session_gen = session_gen + 1 WHERE discord_id = ?', [discordId]);
+  return sessionGeneration(discordId);
 }
 
 // Every Discord account that has ever signed in, WITHOUT the OAuth token
@@ -511,11 +638,24 @@ export async function recordedManagedRoleIds() {
 // whichever endpoint Stripe reached first eat the other store's sale.
 const claimKey = (provider, eventId, scope) => `${provider}:${scope ? `${scope}:` : ''}${eventId}`;
 
-export async function claimEvent(provider, eventId, scope = null) {
-  const { changes } = await q(
-    'INSERT INTO webhook_events (event_id, provider, received_at) VALUES (?, ?, ?) ON CONFLICT (event_id) DO NOTHING',
-    [claimKey(provider, eventId, scope), provider, now()],
-  );
+// `retakeAfter` (seconds) makes a claim on WORK rather than on a delivery: a
+// claim older than that whose work never landed can only have been left by
+// an invocation that died before its catch ran (the platform's hard time
+// limit, an OOM) — and a second delivery would otherwise be answered
+// "duplicate" forever for work nobody did. The caller decides whether the
+// work is still outstanding; this only lets a stale enough claim be retaken.
+export async function claimEvent(provider, eventId, scope = null, { retakeAfter = null } = {}) {
+  const t = now();
+  const { changes } = retakeAfter === null
+    ? await q(
+      'INSERT INTO webhook_events (event_id, provider, received_at) VALUES (?, ?, ?) ON CONFLICT (event_id) DO NOTHING',
+      [claimKey(provider, eventId, scope), provider, t],
+    )
+    : await q(
+      `INSERT INTO webhook_events (event_id, provider, received_at) VALUES (?, ?, ?)
+       ON CONFLICT (event_id) DO UPDATE SET received_at = excluded.received_at WHERE webhook_events.received_at < ?`,
+      [claimKey(provider, eventId, scope), provider, t, t - Number(retakeAfter)],
+    );
   return changes === 1;
 }
 
@@ -523,14 +663,51 @@ export async function releaseEvent(provider, eventId, scope = null) {
   await q('DELETE FROM webhook_events WHERE event_id = ?', [claimKey(provider, eventId, scope)]);
 }
 
+// Claims exist to refuse a provider's retry of a delivery already handled.
+// Stripe stops retrying after three days and NOWPayments within the hour, so
+// a claim older than the retention is dead weight on the one table every
+// webhook inserts into. Returns how many were dropped.
+export async function purgeWebhookEvents(before) {
+  const { changes } = await q('DELETE FROM webhook_events WHERE received_at < ?', [before]);
+  return Number(changes ?? 0);
+}
+
+// An attempt somebody could still pay: started, and either a card form
+// opened after `since` (the Stripe session TTL, counted from created_at) or
+// a crypto invoice whose own expiry has not passed. Two placeholders:
+// `since`, then the current time.
+const OPEN_ATTEMPT = "status = 'started' AND ((expires_at IS NULL AND created_at >= ?) OR expires_at > ?)";
+
 // Buyers with an open checkout for any of these plans, younger than `since` —
 // the seller must not delete a product someone is paying for right now.
 export async function countOpenCheckoutsForPlans(storeId, planIds, since) {
   if (!planIds.length) return 0;
   const marks = planIds.map(() => '?').join(', ');
   const { rows } = await q(
-    `SELECT COUNT(DISTINCT discord_id) AS n FROM checkout_attempts WHERE store_id = ? AND status = 'started' AND created_at >= ? AND plan_id IN (${marks})`,
-    [storeId, since, ...planIds],
+    `SELECT COUNT(DISTINCT discord_id) AS n FROM checkout_attempts WHERE store_id = ? AND ${OPEN_ATTEMPT} AND plan_id IN (${marks})`,
+    [storeId, since, now(), ...planIds],
+  );
+  return Number(rows[0]?.n ?? 0);
+}
+
+// Crypto invoices this buyer could still pay in this store. One buyer needs
+// only one address; a loop minting hundreds is what a cap here stops before
+// the provider is asked for a single one. A WHERE fragment rather than a
+// query, so the conditional insert below counts exactly the same rows.
+//
+// Deliberately NOT
+// restricted to rows that already carry a provider_ref: the order row is
+// written BEFORE the provider is asked for an address, so a row still waiting
+// on that call is an invoice this buyer is in the middle of being given —
+// counting only the finished ones let a burst of parallel clicks mint one
+// address per request. Placeholders: discord_id, [store_id], since, now.
+const openCryptoBy = (storeId) =>
+  `discord_id = ? AND ${storeId === null ? 'store_id IS NULL' : 'store_id = ?'} AND substr(session_id, 1, 3) = 'np_' AND ${OPEN_ATTEMPT}`;
+
+export async function countOpenCryptoAttemptsBy(storeId, discordId, since) {
+  const { rows } = await q(
+    `SELECT COUNT(*) AS n FROM checkout_attempts WHERE ${openCryptoBy(storeId)}`,
+    [discordId, ...(storeId === null ? [] : [storeId]), since, now()],
   );
   return Number(rows[0]?.n ?? 0);
 }
@@ -542,10 +719,10 @@ export async function getSubscriptionByRef(provider, providerRef) {
   return rows[0] ?? null;
 }
 
-export async function upsertSubscription({ discordId, planId, provider, providerRef, status, currentPeriodEnd, graceUntil = null, storeId = null, paidUsd = null, currency = 'usd' }) {
+export async function upsertSubscription({ discordId, planId, provider, providerRef, status, currentPeriodEnd, graceUntil = null, storeId = null, paidUsd = null, currency = 'usd', durationDays = null }) {
   await q(
-    `INSERT INTO subscriptions (store_id, discord_id, plan_id, provider, provider_ref, status, current_period_end, grace_until, paid_usd, currency, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO subscriptions (store_id, discord_id, plan_id, provider, provider_ref, status, current_period_end, grace_until, paid_usd, currency, duration_days, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT (provider, provider_ref) DO UPDATE SET
        store_id = excluded.store_id,
        discord_id = excluded.discord_id,
@@ -555,8 +732,9 @@ export async function upsertSubscription({ discordId, planId, provider, provider
        grace_until = excluded.grace_until,
        paid_usd = COALESCE(excluded.paid_usd, subscriptions.paid_usd),
        currency = excluded.currency,
+       duration_days = COALESCE(excluded.duration_days, subscriptions.duration_days),
        updated_at = excluded.updated_at`,
-    [storeId, discordId, planId, provider, providerRef, status, currentPeriodEnd, graceUntil, paidUsd, currency, now(), now()],
+    [storeId, discordId, planId, provider, providerRef, status, currentPeriodEnd, graceUntil, paidUsd, currency, durationDays, now(), now()],
   );
   return getSubscriptionByRef(provider, providerRef);
 }
@@ -597,8 +775,78 @@ export async function recordCheckoutAttempt({ storeId = null, planId, discordId,
   );
 }
 
-export async function setCheckoutAttemptRef(sessionId, providerRef) {
-  await q('UPDATE checkout_attempts SET provider_ref = ? WHERE session_id = ?', [providerRef, sessionId]);
+// The same row, but only if it does not break a limit — the count and the
+// insert are one statement, inside one store-wide critical section.
+//
+// Both rails used to count first and insert after, with a provider round trip
+// in between: two buyers who clicked Pay in the same second each read "no seat
+// taken", each waited on Stripe or NOWPayments, and each got a checkout for
+// the last seat — and on the card rail both were then delivered, because a
+// card sale has no settlement-time re-check. Counting inside the INSERT is
+// not enough on Postgres (READ COMMITTED gives each statement its own
+// snapshot, and there is no row to lock for a seat nobody has taken yet), so
+// the reservation runs inside driver.serialized(): everything a limit counts
+// is written there, so whoever gets the lock second counts what the first one
+// wrote.
+//
+// Guards (each skipped when its argument is null):
+//   seatLimit     — distinct OTHER buyers of this plan (paid subscriptions
+//                   plus open checkouts) must still be under the limit
+//   maxOpenCrypto — this buyer's own live crypto invoices in this store
+// `reservedSince` is the card-form TTL boundary, as everywhere else.
+//
+// Answers true when the row went in, false when a guard refused it.
+export async function insertCheckoutAttemptWithin({
+  storeId = null, planId, discordId, sessionId, amountUsd = 0, discountCode = null, currency = 'usd',
+  seatLimit = null, maxOpenCrypto = null, reservedSince,
+}) {
+  const t = now();
+  const guards = [];
+  const guardArgs = [];
+  if (seatLimit !== null && seatLimit !== undefined) {
+    const takers = seatTakers(storeId, planId, { exceptUid: discordId, reservedSince });
+    guards.push(`(SELECT COUNT(*) FROM (${takers.sql}) t) < ?`);
+    guardArgs.push(...takers.args, seatLimit);
+  }
+  if (maxOpenCrypto !== null && maxOpenCrypto !== undefined) {
+    guards.push(`(SELECT COUNT(*) FROM checkout_attempts WHERE ${openCryptoBy(storeId)}) < ?`);
+    guardArgs.push(discordId, ...(storeId === null ? [] : [storeId]), reservedSince, t, maxOpenCrypto);
+  }
+  const sql = `INSERT INTO checkout_attempts (store_id, plan_id, discord_id, session_id, amount_usd, currency, discount_code, status, created_at)
+     SELECT ?, ?, ?, ?, ?, ?, ?, 'started', ?${guards.length ? ` WHERE ${guards.join(' AND ')}` : ''}`;
+  const args = [storeId, planId, discordId, sessionId, amountUsd, currency, discountCode, t, ...guardArgs];
+  // Nothing to serialize when nothing is being limited.
+  if (!guards.length) return Number((await q(sql, args)).changes ?? 0) > 0;
+  // One store's checkouts at a time. Anything narrower (per plan, say) would
+  // let this buyer's crypto-invoice cap, which is counted across the whole
+  // store, slip between two locks.
+  const driver = await db();
+  return driver.serialized(`checkout:${storeId === null || storeId === undefined ? 'default' : storeId}`, async (tx) => {
+    const { changes } = await tx.query(sql, args);
+    return Number(changes ?? 0) > 0;
+  });
+}
+
+// A card reservation, once the Stripe session it holds the seat for exists.
+// The completion webhook matches on the session id, so the placeholder the
+// seat was reserved under must become the real one before the buyer can pay.
+export async function attachCheckoutSession(reservationId, sessionId, { amountUsd, currency }) {
+  await q(
+    "UPDATE checkout_attempts SET session_id = ?, amount_usd = ?, currency = ? WHERE session_id = ? AND status = 'started'",
+    [sessionId, amountUsd, currency, reservationId],
+  );
+}
+
+// `expiresAt` is the provider's own deadline for the payment (unix seconds):
+// the row holds its seat and its discount use until then.
+export async function setCheckoutAttemptRef(sessionId, providerRef, expiresAt = null) {
+  await q('UPDATE checkout_attempts SET provider_ref = ?, expires_at = ? WHERE session_id = ?', [providerRef, expiresAt, sessionId]);
+}
+
+// An attempt that can never be paid — the provider refused to create the
+// payment — stops holding anything the moment that is known.
+export async function releaseCheckoutAttempt(sessionId, at = now()) {
+  await q("UPDATE checkout_attempts SET expires_at = ? WHERE session_id = ? AND status = 'started'", [at, sessionId]);
 }
 
 // The order behind a crypto payment. NOWPayments' IPN carries only our own
@@ -612,8 +860,54 @@ export async function getCheckoutAttempt(sessionId) {
 
 // The completion webhook is the only thing that flips a row. It is replayed by
 // Stripe on retries, so completed_at is written once and never moved.
+// Answers whether THIS call flipped the row — the once-only signal the
+// completion side effects (discount use, sale ping) hang off.
 export async function markCheckoutCompleted(sessionId, at = now()) {
-  await q("UPDATE checkout_attempts SET status = 'completed', completed_at = ? WHERE session_id = ? AND status <> 'completed'", [at, sessionId]);
+  const { changes } = await q("UPDATE checkout_attempts SET status = 'completed', completed_at = ? WHERE session_id = ? AND status <> 'completed'", [at, sessionId]);
+  return Number(changes ?? 0) > 0;
+}
+
+// A crypto invoice the provider closed without payment (expired, failed,
+// refunded). Closing the attempt too is what stops the cron asking about it
+// every hour for a week, and releases the seat and discount use it held.
+export async function markCheckoutExpired(sessionId) {
+  await q("UPDATE checkout_attempts SET status = 'expired' WHERE session_id = ? AND status = 'started'", [sessionId]);
+}
+
+// Crypto money that landed and could not be delivered. Not 'completed' — the
+// buyer got nothing — and not 'expired' either, which means the invoice was
+// never paid. It is the terminal answer for an order the seller has been
+// told about: the cron stops asking, a later delivery has nothing left to
+// announce, and the seat and discount use it held go back.
+// Answers whether THIS call closed it — the once-only signal the seller's
+// alert hangs off, the same way markCheckoutCompleted gates the sale ping.
+// completed_at stays NULL: it is what every surface reads as "and then they
+// paid for it", and nobody got what they paid for here.
+export async function markCheckoutUndelivered(sessionId) {
+  const { changes } = await q(
+    "UPDATE checkout_attempts SET status = 'undelivered' WHERE session_id = ? AND status = 'started'",
+    [sessionId],
+  );
+  return Number(changes ?? 0) > 0;
+}
+
+// Crypto orders a payment was created for that nobody ever closed: what the
+// cron asks the provider about. Least recently asked about first, bounded, so
+// a run that cannot get through them all still makes progress — and an order
+// the provider never advances (an underpayment stays `partially_paid` for the
+// whole window) cannot hold the head of the queue and starve every order
+// created after it.
+export async function openCryptoAttempts({ since, until, limit = 20 }) {
+  const { rows } = await q(
+    "SELECT * FROM checkout_attempts WHERE provider_ref IS NOT NULL AND status = 'started' AND created_at >= ? AND created_at <= ? ORDER BY COALESCE(provider_checked_at, 0) ASC, created_at ASC LIMIT ?",
+    [since, until, limit],
+  );
+  return rows;
+}
+
+// Stamped once the provider has answered about an order, whatever it said.
+export async function markCryptoAttemptChecked(sessionId, at = now()) {
+  await q('UPDATE checkout_attempts SET provider_checked_at = ? WHERE session_id = ?', [at, sessionId]);
 }
 
 export async function checkoutAttempts(storeIds = null, { limit = 300 } = {}) {
@@ -1040,17 +1334,25 @@ export async function updateStorePlan(storeId, planKey, fields) {
 // two is the whole time a buyer spends on Stripe's card form. Counting only
 // rows sold a 1-seat product to every buyer on that form at once. `exceptUid`
 // keeps a buyer's own open session from refusing their own retry.
-export async function countBuyersOfPlan(storeId, planKey, { exceptUid = null, reservedSince = null } = {}) {
+// The set of buyers a purchase limit counts, as a sub-SELECT plus its
+// parameters, so the count above and the conditional insert below can never
+// disagree about who holds a seat.
+function seatTakers(storeId, planKey, { exceptUid = null, reservedSince = null } = {}) {
   const storeWhere = storeId === null ? 'store_id IS NULL' : 'store_id = ?';
   const storeArgs = storeId === null ? [] : [storeId];
   const notMe = exceptUid ? ' AND discord_id <> ?' : '';
   const meArgs = exceptUid ? [exceptUid] : [];
-  const reserved = reservedSince === null ? '' : ` UNION SELECT discord_id FROM checkout_attempts WHERE plan_id = ? AND ${storeWhere} AND status = 'started' AND created_at >= ?${notMe}`;
-  const reservedArgs = reservedSince === null ? [] : [planKey, ...storeArgs, reservedSince, ...meArgs];
-  const { rows } = await q(
-    `SELECT COUNT(*) AS n FROM (SELECT discord_id FROM subscriptions WHERE plan_id = ? AND ${storeWhere}${notMe}${reserved}) t`,
-    [planKey, ...storeArgs, ...meArgs, ...reservedArgs],
-  );
+  const reserved = reservedSince === null ? '' : ` UNION SELECT discord_id FROM checkout_attempts WHERE plan_id = ? AND ${storeWhere} AND ${OPEN_ATTEMPT}${notMe}`;
+  const reservedArgs = reservedSince === null ? [] : [planKey, ...storeArgs, reservedSince, now(), ...meArgs];
+  return {
+    sql: `SELECT discord_id FROM subscriptions WHERE plan_id = ? AND ${storeWhere}${notMe}${reserved}`,
+    args: [planKey, ...storeArgs, ...meArgs, ...reservedArgs],
+  };
+}
+
+export async function countBuyersOfPlan(storeId, planKey, { exceptUid = null, reservedSince = null } = {}) {
+  const takers = seatTakers(storeId, planKey, { exceptUid, reservedSince });
+  const { rows } = await q(`SELECT COUNT(*) AS n FROM (${takers.sql}) t`, takers.args);
   return Number(rows[0]?.n ?? 0);
 }
 
@@ -1058,8 +1360,8 @@ export async function countBuyersOfPlan(storeId, planKey, { exceptUid = null, re
 // the same reservation, for a usage limit.
 export async function countReservedDiscountUses(storeId, code, since, exceptUid) {
   const { rows } = await q(
-    "SELECT COUNT(DISTINCT discord_id) AS n FROM checkout_attempts WHERE store_id = ? AND discount_code = ? AND status = 'started' AND created_at >= ? AND discord_id <> ?",
-    [storeId, code, since, exceptUid ?? ''],
+    `SELECT COUNT(DISTINCT discord_id) AS n FROM checkout_attempts WHERE store_id = ? AND discount_code = ? AND ${OPEN_ATTEMPT} AND discord_id <> ?`,
+    [storeId, code, since, now(), exceptUid ?? ''],
   );
   return Number(rows[0]?.n ?? 0);
 }
@@ -1106,6 +1408,28 @@ export async function deleteDiscount(storeId, code) {
 
 export async function incrementDiscountUse(storeId, code) {
   await q('UPDATE discounts SET uses = uses + 1 WHERE store_id = ? AND code = ?', [storeId, code]);
+}
+
+// ── the discount preview's miss budget ────────────────────────────────────────
+// Refused previews within the window, for one asker and for one store. Shared
+// storage, not a process-local Map: on the functions this ships as, a Map is a
+// fresh budget per instance and per cold start.
+
+export async function countDiscountMisses(asker, since) {
+  const { rows } = await q('SELECT COUNT(*) AS n FROM discount_misses WHERE asker = ? AND at >= ?', [asker, since]);
+  return Number(rows[0]?.n ?? 0);
+}
+
+export async function countDiscountMissesForStore(store, since) {
+  const { rows } = await q('SELECT COUNT(*) AS n FROM discount_misses WHERE store = ? AND at >= ?', [store, since]);
+  return Number(rows[0]?.n ?? 0);
+}
+
+// Records one refused preview and drops everything older than the window, so
+// the table stays the size of the last ten minutes of guessing.
+export async function recordDiscountMiss(asker, store, since) {
+  await q('INSERT INTO discount_misses (asker, store, at) VALUES (?, ?, ?)', [asker, store, now()]);
+  await q('DELETE FROM discount_misses WHERE at < ?', [since]);
 }
 
 export async function createStorePlan({ storeId, planKey, name, description, imageUrl, priceUsd, lifetime, durationDays, stripePriceId, variantOf, currency = 'usd' }) {

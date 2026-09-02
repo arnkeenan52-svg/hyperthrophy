@@ -71,10 +71,27 @@ export const config = {
   // Dues is the host checkout platform; the product being sold is the
   // Discord server itself (DISCORD_GUILD_NAME, e.g. Tradeleaks).
   platform: env('PLATFORM_NAME', 'Dues'),
+  // Name of the BUILT-IN store (the one DISCORD_GUILD_ID sells): its slug,
+  // its display name, and the name buyer-facing messages use when a store
+  // has none of its own. The fallback is the founding store, not a stale
+  // brand — changing it moves that store's URL, so it is set explicitly in
+  // .env.example rather than derived from PLATFORM_NAME.
   brand: env('BRAND') || 'Tradeleaks',
   // The Dues community server. Permanent invite, no expiry, no use cap.
-  // Env-overridable so a re-issued invite is a dashboard change, not a deploy.
-  communityInvite: env('COMMUNITY_INVITE') || 'https://discord.gg/G6yjsX5qbB',
+  // One setting, but its readers pick it up at two different moments, and the
+  // comment that used to sit here claimed only the first half.
+  //   • Per request: the site's "Join our Discord" hop (api/community.js) —
+  //     which every hand-written page's community link points at — and the
+  //     receipt email. Setting COMMUNITY_INVITE re-points those with no deploy.
+  //   • At generate time: the 45 generated marketing pages link the invite
+  //     directly in their footer and take it from this field when
+  //     scripts/gen-seo-pages.mjs runs. They are committed build artifacts, so
+  //     moving them is a regenerate + commit — not an env change. The e2e
+  //     suite pins that the shipped pages carry this value, so the generator
+  //     and the config cannot drift apart unnoticed.
+  // DISCORD_COMMUNITY_INVITE is the older spelling the hop used to read on its
+  // own; honoured so a deployment that set it keeps its invite.
+  communityInvite: env('COMMUNITY_INVITE') || env('DISCORD_COMMUNITY_INVITE') || 'https://discord.gg/G6yjsX5qbB',
   // Discord user id of the store owner: unlocks owner-only platform views.
   ownerDiscordId: env('OWNER_DISCORD_ID'),
   port: num('PORT', 4000),

@@ -53,6 +53,22 @@ function showStillPending(server) {
     `provider confirms — no action needed. Check ${serverLabel(server)} again in a minute.`;
 }
 
+// A receipt URL with no order behind it — no store, an unknown store, or no
+// ?plan. Bailing out silently left the page on "Payment received / Finishing
+// up your order…" with a pulsing ring and a dash in every field, forever: a
+// payment-shaped promise about an order that does not exist. Say so instead.
+function showNotFound() {
+  // display:flex on the ring outranks the UA's [hidden] rule, so the style wins.
+  $('#check-ring').style.display = 'none';
+  $('#r-heading').textContent = 'No order to show';
+  $('#r-sub').textContent = 'This link does not point at a purchase.';
+  $('#r-details').hidden = true;
+  const callout = $('#r-callout');
+  callout.classList.remove('pending');
+  callout.innerHTML =
+    'Check the link your community sent you. If you have already paid, your purchases are listed under <a href="/account">My account</a>.';
+}
+
 async function main() {
   const STORE_SLUG = new URLSearchParams(location.search).get('store') ?? '';
   const storeQS = /^[a-z0-9-]{1,40}$/.test(STORE_SLUG) ? `?store=${encodeURIComponent(STORE_SLUG)}` : '';
@@ -64,8 +80,14 @@ async function main() {
   const [plansRes, meRes] = await Promise.all([fetch(`/api/plans${storeQS}`), fetch('/api/me')]);
   let me = await meRes.json();
   renderAccount(me);
-  if (!plansRes.ok) return; // an unknown store: nothing to name and nothing to poll for
-  const plansBody = await plansRes.json();
+  // Only a 404 proves there is nothing here: that is the one answer /api/plans
+  // gives for an unknown store. Every other failure — a 5xx out of guard(), a
+  // 429, an edge blip — is the platform stumbling, and a buyer arriving from
+  // Stripe on a good link must never be told their purchase does not exist.
+  // Fall through on an empty catalogue instead: the buyer's own subscription
+  // row still names what they bought, and the entitlement poll below still runs.
+  if (plansRes.status === 404) return showNotFound(); // an unknown store: nothing to name and nothing to poll for
+  const plansBody = plansRes.ok ? await plansRes.json().catch(() => ({})) : {};
   const plans = plansBody.plans ?? [];
   const server = plansBody.server ?? {};
   // Plan ids are unique only WITHIN a store ("vip" exists in many), so every
@@ -86,7 +108,7 @@ async function main() {
   // taken off sale there is no catalogue left to borrow a symbol from.
   const plan = plans.find((p) => p.id === requested)
     ?? (requested ? { id: requested, name: owned?.planName ?? 'Your purchase', roleNames: owned?.roleNames ?? [], lifetime: owned?.lifetime ?? false, interval: '', priceUsd: null, currency: owned?.currency ?? plans[0]?.currency } : null);
-  if (!plan) return;
+  if (!plan) return showNotFound();
 
   $('#r-server').textContent = server.name || '—';
   $('#r-product').textContent = plan.name;

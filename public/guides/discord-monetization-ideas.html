@@ -10,7 +10,7 @@
   <meta property="og:type" content="website" />
   <meta property="og:title" content="8 Discord Monetization Ideas That Actually Work" />
   <meta property="og:description" content="Eight proven ways servers earn: paid signals, tiered mentorship, cook-group seats, lifetime memberships, early access, VIP AMAs, resource vaults and priority support." />
-  <meta property="og:image" content="https://dues.gg/og-card.jpg?v=197" />
+  <meta property="og:image" content="https://dues.gg/og-card.jpg?v=198" />
   <meta property="og:image:type" content="image/jpeg" />
   <meta property="og:image:width" content="1200" />
   <meta property="og:image:height" content="630" />
@@ -24,26 +24,21 @@
   <meta name="twitter:card" content="summary_large_image" />
   <meta name="twitter:site" content="@duesdiscord" />
   <meta name="twitter:creator" content="@duesdiscord" />
-  <meta name="twitter:image" content="https://dues.gg/og-card.jpg?v=197" />
+  <meta name="twitter:image" content="https://dues.gg/og-card.jpg?v=198" />
   <meta name="twitter:image:alt" content="The Dues homepage: a bright daytime sky with the headline 'Monetize your community.' and a field for claiming a store link" />
-  <!-- Icons, all four at STABLE urls with no ?v= on them. Google caches the
+  <!-- Icons, all four at STABLE urls with no ?v= on them: Google caches the
        search-result favicon by URL and re-crawls it rarely, so a version query
        that moves on every ship hands it a URL it has never seen instead of the
-       one it already holds. The reasoning was written here before and then
-       contradicted two lines down, which is how the one URL Google prefers —
-       the 96px PNG — ended up as the only versioned one. Vercel serves these
-       with must-revalidate, so the query bought no freshness either.
-       Sizes are what the files ARE: favicon.ico now carries 48 and 96, both
-       multiples of 48, which is what Google requires. It used to hold a single
-       16x16 and be declared as 32x32; the comment here claimed 16/32/48/64.
-       Three answers, one 449-byte file, none of them checked. Rebuild it with
-       scripts/gen-favicon-ico.mjs, which reads its own output back. -->
+       one it already holds. Sizes are what favicon.ico IS — 48 and 96, built
+       by scripts/gen-favicon-ico.mjs, which reads its output back and carries
+       the rule as Google states it: square, at least 8x8, larger than 48x48
+       recommended. -->
   <link rel="icon" href="/favicon.ico" sizes="48x48 96x96" />
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <link rel="icon" type="image/png" sizes="96x96" href="/favicon-96x96.png" />
   <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
   <link rel="manifest" href="/site.webmanifest" />
-  <link rel="stylesheet" href="/styles.css?v=197" />
+  <link rel="stylesheet" href="/styles.css?v=198" />
   <style>
 /* day-sky theme — overrides the monochrome tokens in styles.css (all states) */
 :root, :root[data-theme='light'], :root[data-theme='dark'] {
@@ -75,7 +70,7 @@
   --solid: #5865f2;
   --solid-ink: #ffffff;
   --blurple: #5865f2;
-  --blurple-text: #4753c9;
+  --blurple-text: #424cbd;
   --good: #15803d;
   --bad: #c43c3c;
   --money: #15803d;
@@ -147,9 +142,17 @@ body.home .disc-hero .kicker { color: rgba(15,22,38,.72); }
 /* footnotes need real muted ink, not a transparent mix */
 .calc-note, .footer-disclaimer { color: #66748f; }
 .calc-bar-sub { color: rgba(15,22,38,.55); }
-/* links read blurple everywhere */
-.guide-body a { color: #5865f2; }
-.alt-card .seo-card-cta a { color: #5865f2; }
+/* links read blurple everywhere — the TEXT blurple. #5865f2 is 4.3:1 on the
+   paper and ~3.1:1 where the sky still tints the ground. --blurple-text is
+   the darkest shade that still reads as blurple: #424cbd measures 6.6:1 on
+   the paper and 5.0:1 on the bluest band a prose link sits on (the top of
+   /guides/discord-monetization-ideas, ground #c4dcf3 — where #4753c9 was
+   4.4). Same for every other blurple-on-paper text: card CTAs, the "Dues"
+   table column and the calculator readouts, which styles.css paints with
+   --accent. */
+.guide-body a { color: var(--blurple-text); }
+.alt-card .seo-card-cta a { color: var(--blurple-text); }
+.seo-card-cta, .cmp-table th:nth-child(2), .calc-label output { color: var(--blurple-text); }
 /* "our product" chip on the alternatives lists */
 .alt-ours { background: #5865f2; color: #ffffff; }
 /* search box as glass (discover) */
@@ -158,7 +161,7 @@ body.home .disc-hero .kicker { color: rgba(15,22,38,.72); }
   <script type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Dues","item":"https://dues.gg/"},{"@type":"ListItem","position":2,"name":"Guides","item":"https://dues.gg/guides"},{"@type":"ListItem","position":3,"name":"8 Discord Monetization Ideas That Actually Work","item":"https://dues.gg/guides/discord-monetization-ideas"}]}</script>
   <script type="application/ld+json">{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Which idea should I start with?","acceptedAnswer":{"@type":"Answer","text":"The one closest to what your members already ask you for. Package the thing you repeatedly give away, gate it behind one role, price it monthly."}},{"@type":"Question","name":"Can I run several of these at once?","acceptedAnswer":{"@type":"Answer","text":"Yes — each is just a product mapped to a role. Two or three complementary offers (signals + lifetime + VIP AMA) is a common shape."}},{"@type":"Question","name":"How do I take payments for all this?","acceptedAnswer":{"@type":"Answer","text":"Any subscription layer works mechanically; they differ in fees and who holds your money. Dues charges a flat plan, takes 0% of sales, and pays straight into your own Stripe account."}}]}</script>
   <script type="application/ld+json">{"@context":"https://schema.org","@type":"Article","headline":"8 Discord Monetization Ideas That Actually Work","description":"Eight proven ways servers earn: paid signals, tiered mentorship, cook-group seats, lifetime memberships, early access, VIP AMAs, resource vaults and priority support.","author":{"@type":"Organization","name":"Dues"},"publisher":{"@type":"Organization","name":"Dues","url":"https://dues.gg"},"mainEntityOfPage":"https://dues.gg/guides/discord-monetization-ideas"}</script>
-  <script src="/theme.js?v=197"></script>
+  <script src="/theme.js?v=198"></script>
 </head>
 <body class="home seo-page">
 <i class="ui-tint" aria-hidden="true"></i>
@@ -166,7 +169,7 @@ body.home .disc-hero .kicker { color: rgba(15,22,38,.72); }
 
   <header class="top xoe-nav">
     <div class="top-left">
-      <a href="/"><img class="platform-mark" src="/dues.png?v=197" alt="Dues" height="20" /></a>
+      <a href="/"><img class="platform-mark" src="/dues.png?v=198" alt="Dues" height="20" /></a>
     </div>
     <nav class="top-center" aria-label="Main">
       <a class="nav-link" href="/discover">Discover</a>
@@ -228,7 +231,7 @@ body.home .disc-hero .kicker { color: rgba(15,22,38,.72); }
 
   <footer class="site-footer cols seo-footer">
     <div class="footer-brand">
-      <img class="powered-mark" src="/dues.png?v=197" alt="Dues" height="16" />
+      <img class="powered-mark" src="/dues.png?v=198" alt="Dues" height="16" />
       <span class="footer-copy">© Dues</span>
     </div>
     <nav class="footer-col"><span class="footer-head">Product</span>
@@ -242,25 +245,28 @@ body.home .disc-hero .kicker { color: rgba(15,22,38,.72); }
       <a href="/vs/memberful">Dues vs Memberful</a><a href="/vs/gumroad">Dues vs Gumroad</a>
       <a href="/vs/ko-fi">Dues vs Ko-fi</a><a href="/vs/buymeacoffee">Dues vs Buy Me a Coffee</a>
       <a href="/vs/upgrade-chat">Dues vs Upgrade.Chat</a><a href="/vs/mighty-networks">Dues vs Mighty Networks</a>
-      <a href="/vs/">All comparisons</a>
+      <a href="/vs">All comparisons</a>
       <a href="/alternatives/best-discord-monetization-platforms">Best platforms</a>
       <a href="/alternatives/whop-alternatives">Whop alternatives</a>
-      <a href="/alternatives/">All alternatives</a></nav>
+      <a href="/alternatives">All alternatives</a></nav>
     <nav class="footer-col"><span class="footer-head">Guides</span>
       <a href="/guides/best-discord-monetization-platform">Best platform to use</a>
       <a href="/guides/how-to-monetize-a-discord-server">Monetize a Discord server</a>
       <a href="/guides/how-to-sell-discord-roles">Sell Discord roles</a>
       <a href="/guides/discord-paywall">Paywall a Discord</a>
-      <a href="/guides/discord-membership-bot">Discord membership bots</a></nav>
+      <a href="/guides/discord-membership-bot">Discord membership bots</a>
+      <a href="/guides">All guides</a></nav>
     <nav class="footer-col"><span class="footer-head">Tools</span>
       <a href="/tools/discord-fee-calculator">Discord fee calculator</a>
       <a href="/tools/whop-fee-calculator">Whop fee calculator</a>
       <a href="/tools/launchpass-fee-calculator">LaunchPass fee calculator</a>
-      <a href="/tools/patreon-fee-calculator">Patreon fee calculator</a></nav>
+      <a href="/tools/patreon-fee-calculator">Patreon fee calculator</a>
+      <a href="/tools">All calculators</a></nav>
     <nav class="footer-col"><span class="footer-head">Use cases</span>
       <a href="/use-cases/trading">Trading signals</a><a href="/use-cases/sports-betting">Sports picks</a>
       <a href="/use-cases/fitness">Fitness coaching</a><a href="/use-cases/reselling">Cook groups</a>
-      <a href="/use-cases/ecommerce">Ecommerce mentorship</a><a href="/use-cases/exclusive-content">Exclusive content</a></nav>
+      <a href="/use-cases/ecommerce">Ecommerce mentorship</a><a href="/use-cases/exclusive-content">Exclusive content</a>
+      <a href="/use-cases">All use cases</a></nav>
     <nav class="footer-col"><span class="footer-head">Legal</span><a href="/terms">Terms</a><a href="/privacy">Privacy</a></nav>
     <p class="footer-disclaimer">Not affiliated with Discord Inc. or any platform compared here. Competitor pricing as publicly listed — verify on their sites. Payments are processed by Stripe on each store owner’s own account.</p>
   </footer>

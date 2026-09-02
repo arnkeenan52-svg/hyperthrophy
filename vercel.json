@@ -113,11 +113,28 @@
     "api/cron/reconcile.js": {
       "maxDuration": 60
     },
+    "api/checkout/crypto.js": {
+      "maxDuration": 60
+    },
+    "api/admin/store.js": {
+      "maxDuration": 60
+    },
     "api/store-page.js": {
       "includeFiles": "public/store.html"
     }
   },
   "redirects": [
+    {
+      "source": "/:path*",
+      "has": [
+        {
+          "type": "host",
+          "value": "(www\\.)?ripleybot\\.com"
+        }
+      ],
+      "destination": "https://dues.gg/:path*",
+      "permanent": true
+    },
     {
       "source": "/store/:slug",
       "destination": "/:slug",

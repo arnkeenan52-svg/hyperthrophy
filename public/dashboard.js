@@ -4,6 +4,15 @@
 // hash-routed (#/ picker, #/setup/<guildId> wizard, #/store/<slug>/<section>).
 const $ = (sel) => document.querySelector(sel);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+// Sign out is a POST: the session cookie rides on cross-site GETs, so a
+// GET link could be fired by any third-party page (see api/auth/logout.js).
+const signOut = () => {
+  const f = document.createElement('form');
+  f.method = 'post';
+  f.action = '/auth/logout';
+  document.body.appendChild(f);
+  f.submit();
+};
 // Discord roles display as @Name exactly once — a role literally named
 // "@PREMIUM" must not render as "@@PREMIUM". Stored names stay verbatim.
 const roleLabel = (r) => `@${String(r ?? '').replace(/^@+/, '')}`;
@@ -165,7 +174,7 @@ function renderNav() {
   el.innerHTML = `<a class="nav-link" href="/account">Account</a>`
     + (handle ? `<span class="nav-user">@${esc(handle)}</span>` : '')
     + `<button class="btn-ghost" id="logout">Sign out</button>`;
-  $('#logout').onclick = () => (window.location.href = '/auth/logout');
+  $('#logout').onclick = signOut;
 }
 
 // "59.99" and "59,99" both parse. Number inputs on comma-decimal phones
@@ -388,7 +397,7 @@ async function viewPicker() {
       <p class="picker-label">Your Servers</p>
       <div class="g-list" id="g-list"><div class="sk-row panel" aria-hidden="true"></div><div class="sk-row panel" aria-hidden="true"></div></div>
     </section></div>`;
-  $('#logout2').onclick = () => (window.location.href = '/auth/logout');
+  $('#logout2').onclick = signOut;
   const status = await loadGuilds();
   const list = $('#g-list');
   if (!list) return;
@@ -732,6 +741,17 @@ function deltaChip(delta) {
   // invented result on the one number a seller checks first. Flat says flat.
   if (Number(n) === 0) return '<span class="delta flat">0%</span>';
   return `<span class="delta ${delta > 0 ? 'up' : 'down'}"><span aria-hidden="true">${delta > 0 ? '▲' : '▼'}</span>${n}%</span>`;
+}
+
+// A save that ends in a full re-render lands on a screen identical to the one
+// before the click, so nothing said it worked. Settings' payment key says
+// "Updated ✓" for 1.6s; these sections say so through their status slot,
+// which is looked up AFTER the re-render because the old one is gone.
+function flashSaved(sel) {
+  const el = $(sel);
+  if (!el) return;
+  el.textContent = 'Saved ✓';
+  setTimeout(() => { if (el.isConnected) el.textContent = ''; }, 1600);
 }
 
 function statCard(label, value, icon, delta = null, sub = '', spark = '') {
@@ -1199,6 +1219,29 @@ const SECTIONS = [
 // on Android paints its bar from <meta name="theme-color">, which is a static
 // navy in the markup — theme.js only re-syncs it from the BODY background, and
 // on this page the body is transparent, so its sync silently no-ops here.
+// The last SAVED face also lives in localStorage, under the key the inline
+// script in dashboard.html's head reads, so a seller who chose black gets a
+// black first paint instead of a navy flash while /api/admin/payments loads.
+// Only viewStore writes it, from the stored preference — a Customize preview
+// never lands here, so an abandoned preview cannot outlive the page.
+// One key per store beside it. The face is a per-STORE preference, so a
+// single browser-wide key held whichever store was opened last: a seller
+// running one black and one navy store got the wrong first paint on every
+// cold load of the other one, in alternation — the flash this key exists to
+// stop, moved rather than removed. The head script reads the per-store key
+// for #/store/<slug> and falls back to the bare key for the store-less views
+// (picker, setup, admin), which have no face of their own.
+const DARK_FACE_KEY = 'dues-dash-face';
+const darkFaceKey = (slug) => `${DARK_FACE_KEY}:${slug}`;
+function savedDarkFace() {
+  try { return localStorage.getItem(DARK_FACE_KEY) === 'black' ? 'black' : 'navy'; } catch { return 'navy'; }
+}
+function rememberDarkFace(face, slug = null) {
+  try {
+    localStorage.setItem(DARK_FACE_KEY, face);
+    if (slug) localStorage.setItem(darkFaceKey(slug), face);
+  } catch { /* private mode: the flash returns, nothing else */ }
+}
 function applyDarkFace(face) {
   const root = document.documentElement;
   if (face === 'black') root.dataset.dark = 'black';
@@ -1237,7 +1280,12 @@ function sectionOverview(data, store, slug) {
   const newMembersPrev = prevRange ? newIn(win.prev) : 0;
 
 
-  const mrrRows = data.payments.filter((p) => p.entitled && !p.lifetime);
+  // Each row at its MONTHLY rate, not its period price: see monthlyRate().
+  // Only rows that BILL AGAIN — the server marks them `renews`. A crypto pass
+  // is a fixed term nothing renews (the buyer is told exactly that on
+  // /account) and a manual grant was never charged; counting either as
+  // recurring revenue gives a store an MRR that expires on its own.
+  const mrrRows = data.payments.filter((p) => p.entitled && !p.lifetime && p.renews).map((p) => ({ ...p, amountUsd: monthlyRate(p) }));
   const mrrNewRows = mrrRows.filter((p) => inWin(p, win.cur));
   const mrrNew = sum(mrrNewRows);
 
@@ -1253,7 +1301,7 @@ function sectionOverview(data, store, slug) {
     rev: sparkSvg(series.curVals),
     sales: sparkSvg(bucketSeries(data.payments, win, () => 1).curVals),
     members: sparkSvg(bucketSeries(firstBuys, win, () => 1).curVals),
-    mrr: sparkSvg(bucketSeries(data.payments.filter((p) => !p.lifetime), win).curVals),
+    mrr: sparkSvg(bucketSeries(data.payments.filter((p) => !p.lifetime && p.renews), win, monthlyRate).curVals),
   };
 
   // Top products with per-product change vs the previous window.
@@ -1271,11 +1319,11 @@ function sectionOverview(data, store, slug) {
   const allTime = allEnts ? (allEnts.length ? allEnts.map(([c, v]) => usd(v, c)).join(' + ') : usd(0)) : usd(data.totals.allTimeUsd, data.totals.currency ?? undefined);
   const top = [...byPlan.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
   const topMax = Math.max(...top.map(([, v]) => v), 1);
-  const topDelta = (name, v) => {
-    const prev = byPlanPrev.get(name) ?? 0;
-    const d = pct(v, prev);
-    return d === null ? '' : `<span class="delta ${d >= 0 ? 'up' : 'down'}"><span aria-hidden="true">${d >= 0 ? '▲' : '▼'}</span>${Math.abs(d) >= 100 ? Math.round(Math.abs(d)) : Math.abs(d).toFixed(0)}%</span>`;
-  };
+  // The Revenue card sits beside this list, and a second copy of the rule is
+  // a second rounding: deltaChip keeps a decimal below 10%, this one did not,
+  // so the same +0.4% read a green ▲0.4% up there and a flat 0% down here —
+  // the two chips disagreeing about DIRECTION on one number. One formatter.
+  const topDelta = (name, v) => deltaChip(pct(v, byPlanPrev.get(name) ?? 0));
 
   const recent = data.payments.slice(0, 6);
   const seg = RANGES.map(
@@ -1412,6 +1460,20 @@ function billingLabel(p) {
   const d = p.durationDays;
   if (!d || d === 31) return 'Monthly';
   return TERM_WORDS[d] ?? `Every ${d} days`;
+}
+
+// A recurring row's MONTHLY rate. MRR summed each row's whole period price,
+// so a $600 yearly plan counted as $600 of monthly recurring revenue — twelve
+// times the truth — and a weekly plan at under a quarter of it. The named
+// terms above divide by their whole number of months, so the figure a seller
+// checks by hand comes out exact (yearly is /12, quarterly /3); any other term
+// scales by days. No term, or a monthly one, is the price as it stands.
+const TERM_MONTHS = { 30: 1, 31: 1, 90: 3, 180: 6, 365: 12, 366: 12 };
+const DAYS_PER_MONTH = 365 / 12;
+function monthlyRate(p) {
+  const d = Number(p.durationDays);
+  if (!(d > 0)) return p.amountUsd;
+  return p.amountUsd / (TERM_MONTHS[d] ?? d / DAYS_PER_MONTH);
 }
 
 function sectionProductsDefault(data) {
@@ -1657,10 +1719,10 @@ const THEME_DEFAULTS = { bg: '#0a0a0a', panel: '#101010', text: '#f5f5f4', accen
 // Mirror of BG_PRESETS in src/lib/theme.js — ids, tones and how each one
 // paints its picker thumbnail. `thumb` (an image) covers photo presets and
 // stands in for the live cloud shader; css presets thumbnail themselves.
-// free: true marks a plain gradient ground — no photograph, no animation.
-// Those are the colour way, and the colour way is free. Everything else here
-// is a wallpaper and needs a plan. src/lib/theme.js FREE_BG_PRESETS is the
-// server's copy of the same ten; a scenario in the suite holds them together.
+// Every entry here is free, on every plan — src/lib/theme.js says the same and
+// a scenario in the suite holds the two lists together. The only part of a
+// look a plan still buys is an imported URL, which is the seller's own image
+// from the seller's own host; the field below carries that lock, not the grid.
 const BG_CATALOG = [
   // These four read as two duplicated tiles unless the difference is visible
   // BEFORE you pick: the animated pair and the still pair were shipping the
@@ -1701,16 +1763,16 @@ const BG_CATALOG = [
   { id: 'confetti', label: 'Confetti', tone: 'dark' },
   { id: 'smoke', label: 'Smoke', tone: 'dark' },
   { id: 'golddust', label: 'Gold dust', tone: 'dark' },
-  { id: 'midnight', label: 'Midnight', tone: 'dark' , free: true},
-  { id: 'denim', label: 'Denim', tone: 'dark' , free: true},
-  { id: 'royal', label: 'Royal', tone: 'dark' , free: true},
-  { id: 'emerald', label: 'Emerald', tone: 'dark' , free: true},
-  { id: 'rose', label: 'Rose', tone: 'dark' , free: true},
-  { id: 'gold', label: 'Gold', tone: 'dark' , free: true},
-  { id: 'slate', label: 'Slate', tone: 'dark' , free: true},
-  { id: 'lavender', label: 'Lavender', tone: 'light' , free: true},
-  { id: 'mint', label: 'Mint', tone: 'light' , free: true},
-  { id: 'ember', label: 'Ember', tone: 'dark' , free: true},
+  { id: 'midnight', label: 'Midnight', tone: 'dark' },
+  { id: 'denim', label: 'Denim', tone: 'dark' },
+  { id: 'royal', label: 'Royal', tone: 'dark' },
+  { id: 'emerald', label: 'Emerald', tone: 'dark' },
+  { id: 'rose', label: 'Rose', tone: 'dark' },
+  { id: 'gold', label: 'Gold', tone: 'dark' },
+  { id: 'slate', label: 'Slate', tone: 'dark' },
+  { id: 'lavender', label: 'Lavender', tone: 'light' },
+  { id: 'mint', label: 'Mint', tone: 'light' },
+  { id: 'ember', label: 'Ember', tone: 'dark' },
 ];
 const THEME_PRESETS = [
   ['Midnight', THEME_DEFAULTS],
@@ -1805,11 +1867,11 @@ function appearanceBody(store, paid) {
         <div class="bgp-grid" role="group" aria-label="Store background">
           <button type="button" class="bgp" data-bgp=""><span class="bgp-thumb bgp-none">&times;</span><span class="bgp-name">None</span></button>
           ${BG_CATALOG.map((b) =>
-            `<button type="button" class="bgp${b.free || paid ? '' : ' bgp-locked'}" data-bgp="${b.id}">
+            `<button type="button" class="bgp" data-bgp="${b.id}">
                <span class="bgp-thumb">${
                  b.thumb
-                   ? `<img src="${b.thumb}" alt="" loading="lazy" />${b.live ? '<span class="bgp-live">LIVE</span>' : ''}${b.free || paid ? '' : '<span class="bgp-lock">Pro</span>'}`
-                   : `<span class="store-bg sbg-thumb" data-bg="${b.id}"><span class="sbg-a"></span><span class="sbg-b"></span><span class="sbg-c"></span></span>${b.free || paid ? '' : '<span class="bgp-lock">Pro</span>'}`
+                   ? `<img src="${b.thumb}" alt="" loading="lazy" />${b.live ? '<span class="bgp-live">LIVE</span>' : ''}`
+                   : `<span class="store-bg sbg-thumb" data-bg="${b.id}"><span class="sbg-a"></span><span class="sbg-b"></span><span class="sbg-c"></span></span>`
                }</span>
                <span class="bgp-name">${b.label}</span>
              </button>`).join('')}
@@ -1995,11 +2057,11 @@ function sectionStore(store, link, paid = true) {
       id: 'st-card-theme',
       title: 'Appearance',
       sub: 'Make the store yours — colors, corners and type. Buyers see it instantly.',
-      // Locked rather than hidden: an owner deciding whether to upgrade should
-      // be able to SEE what they would get. Anything they set here is refused
-      // by the server anyway, so the controls are disabled rather than merely
+      // One field is locked rather than hidden: an owner deciding whether to
+      // upgrade should be able to SEE what they would get. What they set there
+      // is refused by the server anyway, so it is disabled rather than merely
       // discouraged, and Reset stays live — undoing never needs a plan.
-      body: (paid ? '' : `<div class="lock-note">${I.lock ?? ''}<span><b>Colours are yours on every plan</b> — all six themes, your own colours, corners, type, and the ten plain gradient grounds. The photo and animated wallpapers, and importing your own, are on Pro and up.</span><a class="btn-pill" href="#/store/${esc(store.slug)}/billing">See plans</a></div>`)
+      body: (paid ? '' : `<div class="lock-note">${I.lock ?? ''}<span><b>The whole look is yours on every plan</b> — all six themes, your own colours, corners, type, and every background in the picker. Importing your own image by URL is on Pro and up.</span><a class="btn-pill" href="#/store/${esc(store.slug)}/billing">See plans</a></div>`)
         + `<div class="th-wrap">${appearanceBody(store, paid)}</div>`,
       foot: `<span class="appearance-foot"><button class="btn-pill" id="th-save">Save appearance</button>
         <button class="btn-ghost" id="th-reset">Reset to default</button>
@@ -2071,8 +2133,9 @@ function sectionCustomize(store) {
           <p class="field-help dc-help">The range your analytics open on.</p></div>
         <p class="field-err" id="dc-note" role="alert"></p>
       </div>`,
-      foot: `<button class="btn-pill" id="dc-save">Save</button>
-        <button class="btn-ghost" id="dc-reset">Reset to default</button>`,
+      foot: `<span class="appearance-foot"><button class="btn-pill" id="dc-save">Save</button>
+        <button class="btn-ghost" id="dc-reset">Reset to default</button>
+        <span class="note-help" id="dc-ok" role="status"></span></span>`,
     })}
     ${/* Not a card. This panel had a title, a sentence and one link, and spent
           169px of a phone screen saying where something else lives — 115px of
@@ -2124,7 +2187,8 @@ function wireCustomize(store, slug) {
     try {
       await api('/api/admin/store', { store: slug, dashboardPrefs: prefsBody });
       state.data = null;
-      viewStore(slug);
+      await viewStore(slug);
+      flashSaved('#dc-ok');
     } catch (err) {
       btn.disabled = false;
       btn.textContent = 'Save';
@@ -2232,6 +2296,12 @@ function sectionSettings(store, isPlatformOwner) {
           nothing to configure. Settings is for decisions, and a panel that
           only announces a behaviour is furniture. Buyers still get their
           confirmation email — see src/services/receipts. */ ''}
+    ${setCard({
+      title: 'Signed-in devices',
+      sub: 'Sign out only clears this browser. This ends every session your account has, on every device — including this one.',
+      body: `<p class="field-err" id="err-logout-all" role="alert"></p>`,
+      foot: `<button class="btn-ghost" id="logout-all">Log out everywhere</button>`,
+    })}
     ${
       !store.isDefault
         ? setCard({
@@ -2276,7 +2346,9 @@ async function viewStore(slug) {
   const dashAccent = /^#[0-9a-f]{6}$/i.test(String(dashPrefs.accent ?? '')) ? dashPrefs.accent : null;
   // The ground, re-derived from the stored preference on every render — which
   // is also what discards an unsaved preview the moment you navigate.
-  applyDarkFace(dashPrefs.darkStyle === 'black' ? 'black' : 'navy');
+  const darkFace = dashPrefs.darkStyle === 'black' ? 'black' : 'navy';
+  applyDarkFace(darkFace);
+  rememberDarkFace(darkFace, store.slug);
   if (dashPrefs.defaultRange && state.rangePicked !== store.slug && RANGES.some(([k]) => k === dashPrefs.defaultRange)) {
     state.range = dashPrefs.defaultRange;
   }
@@ -2594,6 +2666,19 @@ async function viewStore(slug) {
     wireCurrency(store, slug);
     wireCryptoWallet(store, slug);
     wireReceiptSettings(store, slug);
+    const logoutAll = $('#logout-all');
+    if (logoutAll)
+      logoutAll.onclick = async () => {
+        logoutAll.disabled = true;
+        fieldErr('logout-all', '');
+        try {
+          await api('/api/auth/logout-all', {});
+          window.location.href = '/';
+        } catch (err) {
+          logoutAll.disabled = false;
+          fieldErr('logout-all', err.message);
+        }
+      };
   }
 }
 
@@ -3076,8 +3161,9 @@ function wireAppearance(store, slug) {
   // pointer-events:none stops a mouse and nothing else — Tab still reached
   // these, Enter still applied them, the preview still repainted, and then the
   // save was refused with nothing said. A control that cannot be used must be
-  // honestly disabled. Only the paid wallpapers are locked now; every colour
-  // control on this card is live on every plan.
+  // honestly disabled. Only the import-your-own-URL field is locked now;
+  // every colour control and every background in the picker is live on every
+  // plan.
   document.querySelectorAll('.bgp-locked, .bgp-locked input').forEach((el) => { el.disabled = true; });
   const read = () => ({
     bg: $('#th-bg').value,
@@ -3302,7 +3388,8 @@ function wireAppearance(store, slug) {
     try {
       await api('/api/admin/store', { store: slug, theme: read() });
       state.data = null;
-      viewStore(slug);
+      await viewStore(slug);
+      flashSaved('#th-note');
     } catch (err) {
       btn.disabled = false;
       btn.textContent = 'Save appearance';
@@ -3684,6 +3771,17 @@ function wireCurrency(store, slug) {
   };
 }
 
+// Which coins the payout picker offers. /merchant/coins is the provider's
+// DEPOSIT list — a curated starting point, not the limit of what it can pay
+// out in (the save asks payout/validate-address about the exact pair). So a
+// store already saved on a chain outside that list has to find its own coin
+// here: a <select> cannot hold a value it has no option for, and dropping it
+// would blank the card and refuse to save until the seller moved their
+// payouts to a different network than the one on file.
+function payoutCoins(coins, current) {
+  return current && !coins.includes(current) ? [current, ...coins] : coins;
+}
+
 // The crypto payout wallet.
 //
 // Everything about this card is shaped by one fact: a payout is an on-chain
@@ -3766,12 +3864,12 @@ function wireCryptoWallet(store, slug) {
       save.disabled = true;
       return;
     }
-    const coins = info.coins ?? [];
     const current = String(store.cryptoChain ?? '').toLowerCase();
+    const coins = payoutCoins(info.coins ?? [], current);
     chain.innerHTML = ['<option value="">Choose a coin…</option>']
       .concat(coins.map((c) => `<option value="${esc(c)}">${esc(label(c))}</option>`))
       .join('');
-    if (current && coins.includes(current)) chain.value = current;
+    if (current) chain.value = current;
     // Re-check what is already saved. A seller opening this card should be
     // told the wallet on file is still valid for the chain on file, not be
     // shown generic copy that says nothing about their own address.
@@ -3937,8 +4035,13 @@ async function route() {
   clearInterval(wiz.poll);
   const hash = location.hash || '#/';
   const parts = hash.slice(2).split('/');
-  if (parts[0] === 'setup' && parts[1]) return viewSetup(parts[1]);
   if (parts[0] === 'store' && parts[1]) return viewStore(parts[1]);
+  // No store, no per-store preference: the picker, setup and admin views wear
+  // the last saved face. Re-applied on every navigation, so an unsaved black
+  // preview from Customize does not follow the seller out to "All servers" —
+  // viewStore drops it for its own sections; nothing did for these.
+  applyDarkFace(savedDarkFace());
+  if (parts[0] === 'setup' && parts[1]) return viewSetup(parts[1]);
   if (parts[0] === 'admin') return viewAdmin();
   return viewPicker();
 }

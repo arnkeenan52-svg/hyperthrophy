@@ -1,5 +1,14 @@
 const $ = (sel) => document.querySelector(sel);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+// Sign out is a POST: the session cookie rides on cross-site GETs, so a
+// GET link could be fired by any third-party page (see api/auth/logout.js).
+const signOut = () => {
+  const f = document.createElement('form');
+  f.method = 'post';
+  f.action = '/auth/logout';
+  document.body.appendChild(f);
+  f.submit();
+};
 const fmtDate = (unix) => new Date(unix * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 
 let server = null;
@@ -19,7 +28,18 @@ function subCard(sub) {
     : sub.cancelsAt
       ? `Cancelled. Your access runs until ${fmtDate(sub.cancelsAt)}, then the role is removed. Nothing further will be charged.`
       : sub.entitled
-        ? `Renews ${fmtDate(sub.graceUntil ?? sub.currentPeriodEnd)}`
+        // Only a card membership renews. A crypto purchase is a fixed term:
+        // nothing charges again, no reminder precedes the end, and the role
+        // is removed when the date passes — say that, not "Renews". Naming
+        // the crypto rails explicitly matters: a membership the owner granted
+        // by hand (provider "manual") was never paid for, so telling that
+        // member they made "a one-time payment" and should "buy again" is
+        // both untrue and a nudge to pay for something they were given.
+        ? sub.provider === 'nowpayments' || sub.provider === 'coinbase'
+          ? `Access ends ${fmtDate(sub.currentPeriodEnd)} — a one-time payment, nothing renews. Buy again after that date to continue.`
+          : sub.provider === 'stripe'
+            ? `Renews ${fmtDate(sub.graceUntil ?? sub.currentPeriodEnd)}`
+            : `Access ends ${fmtDate(sub.currentPeriodEnd)} — nothing renews.`
         : `Ended ${sub.currentPeriodEnd ? fmtDate(sub.currentPeriodEnd) : ''}`;
   const roles = sub.roleNames?.length ? `<div class="kv"><span>Discord role</span><span>${esc(sub.roleNames.map((r) => `@${String(r ?? '').replace(/^@+/, '')}`).join(', '))}</span></div>` : '';
   // Cancelling is the buyer's own to do. Hiding it behind "email the owner"
@@ -103,7 +123,7 @@ async function load() {
   const account = $('#account');
   if (me.loggedIn) {
     account.innerHTML = `${me.isOwner || me.seller ? '<a class="nav-link" href="/dashboard">Dashboard</a>' : ''}<span>@${esc(me.username ?? me.discordId)}</span><button class="btn-ghost" id="logout">Sign out</button>`;
-    $('#logout').onclick = () => (window.location.href = '/auth/logout');
+    $('#logout').onclick = signOut;
   } else {
     account.innerHTML = '';
   }
@@ -118,12 +138,34 @@ async function load() {
     return;
   }
 
+  // "Sign out" only clears this browser. This one ends every session the
+  // account has anywhere — the thing to reach for after a lost laptop.
+  const securityCard = `
+    <section class="panel sub-card">
+      <h2>Signed-in devices</h2>
+      <p class="note-help">Signs this account out of every browser and device it is logged in on, including this one.</p>
+      <button class="btn-ghost btn-danger" id="logout-all">Log out everywhere</button>
+      <p class="note-help" id="logout-all-note" role="status"></p>
+    </section>`;
+  const wireLogoutAll = () => {
+    const btn = $('#logout-all');
+    btn.onclick = async () => {
+      btn.disabled = true;
+      const res = await fetch('/api/auth/logout-all', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }).catch(() => null);
+      if (res?.ok) { window.location.href = '/'; return; }
+      btn.disabled = false;
+      $('#logout-all-note').textContent = 'That did not work — try again.';
+    };
+  };
+
   const subs = me.subscriptions ?? [];
   if (!subs.length) {
     el.innerHTML = `
       <section class="panel sub-card">
         <p class="note-help">No membership on this account yet. Buy through a server's store link and it will appear here.</p>
-      </section>`;
+      </section>
+      ${securityCard}`;
+    wireLogoutAll();
     return;
   }
 
@@ -134,8 +176,10 @@ async function load() {
       <p class="note-help">If your Discord role ever goes missing, one click puts everything back the way it should be.</p>
       <button class="btn-pill" id="resync">Re-sync my access</button>
       <p class="note-help" id="resync-note"></p>
-    </section>`;
+    </section>
+    ${securityCard}`;
   $('#resync').onclick = resync;
+  wireLogoutAll();
   el.querySelectorAll('[data-cancel]').forEach((b) => { b.onclick = () => cancelSub(b); });
 }
 

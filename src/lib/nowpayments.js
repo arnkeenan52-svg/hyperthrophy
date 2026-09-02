@@ -125,8 +125,41 @@ export async function merchantCoins() {
       .map((c) => c.ticker);
   })();
   coinCache = { at, promise };
-  promise.catch(() => { coinCache = null; });
+  // An empty list is answered but never remembered. It is what a response
+  // of an unexpected shape decodes to, and what a dashboard with every coin
+  // toggled off returns — either way the next request should ask again
+  // rather than refuse every coin for five minutes.
+  promise.then((list) => { if (!list.length && coinCache?.promise === promise) coinCache = null; }, () => { coinCache = null; });
   return promise;
+}
+
+// Is this address one NOWPayments can actually send `currency` to?
+//
+// There is no endpoint that lists the coins payouts can settle in — only
+// the deposit list (/merchant/coins), which answers a different question.
+// This is the provider's own check for the exact pair the seller is about
+// to save: a coin it cannot pay out in fails here the same way a malformed
+// address does. The success body is a bare "OK", not JSON, so this does not
+// go through npFetch.
+//
+// Returns { ok: true } or { ok: false, message } — and THROWS when the
+// provider could not be asked at all, so the caller can tell "no" from
+// "unknown" and treat only the latter as advisory.
+export async function validatePayoutAddress({ address, currency, extraId = null }) {
+  const res = await fetch(`${api()}/payout/validate-address`, {
+    method: 'POST',
+    headers: { 'x-api-key': config.nowpayments.apiKey, 'content-type': 'application/json' },
+    body: JSON.stringify({ address, currency: String(currency).toLowerCase(), extra_id: extraId }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (res.ok) return { ok: true };
+  const detail = await res.text().catch(() => '');
+  if (res.status === 400) {
+    let message = detail;
+    try { message = JSON.parse(detail)?.message ?? detail; } catch { /* plain text */ }
+    return { ok: false, message: String(message).slice(0, 300) };
+  }
+  throw new Error(`nowpayments: POST /payout/validate-address failed with ${res.status}: ${detail.slice(0, 300)}`);
 }
 
 export const minimumFor = (from, to) =>
@@ -151,6 +184,13 @@ export async function createPayment({ plan, store, amount, payCurrency, orderId 
     // is deliberately an exception rather than a fallback.
     throw new Error('nowpayments: refusing to create a payment with no payout address — funds would settle into the platform balance');
   }
+  const payoutChain = String(store?.cryptoChain ?? '').trim().toLowerCase();
+  if (!payoutChain) {
+    // The chain is part of the same guarantee. An address without a chain
+    // is not "pay them in whatever the buyer chose": that sends BTC to a
+    // Solana address, which is the one outcome worse than custody.
+    throw new Error('nowpayments: refusing to create a payment with a payout address but no payout chain');
+  }
   const currency = normalizeCurrency(plan.currency);
   const body = {
     price_amount: Number(amount ?? plan.priceUsd),
@@ -162,7 +202,7 @@ export async function createPayment({ plan, store, amount, payCurrency, orderId 
     // The coin the SELLER is paid in, which is a property of their wallet —
     // not of whatever the buyer chose to send. A seller with a Solana wallet
     // is paid in SOL whether the buyer paid in BTC or USDT.
-    payout_currency: String(store.cryptoChain || payCurrency).toLowerCase(),
+    payout_currency: payoutChain,
     order_id: orderId,
     order_description: `${plan.name} — ${store?.name ?? config.brand}`,
     ipn_callback_url: ipnCallbackUrl(),
@@ -214,35 +254,43 @@ const num = (v) => {
   return Number.isFinite(n) ? n : 0;
 };
 
-// What actually landed, expressed in the ORDER's own fiat currency.
+// What actually landed, expressed in the ORDER's own fiat currency, or null
+// when nothing here can say.
 //
 // Wrong-asset auto-processing is ON, so the coin that arrives is not
 // necessarily `pay_currency`: a buyer who sends the wrong token to the
 // invoice address has it converted at the current rate and credited anyway.
 // That makes `actually_paid` — denominated in the coin the invoice ASKED for —
 // the wrong thing to reason about on its own. `actually_paid_at_fiat` is the
-// value of what genuinely arrived, so it wins whenever NOWPayments sends it;
-// the ratio fallback only runs when it does not.
+// value of what genuinely arrived, and it is the ONLY field that says so.
+//
+// There used to be a ratio fallback, `(actually_paid / pay_amount) * price`,
+// for payments that arrive without it. That is the wrong-asset assumption
+// spelled out — the very assumption paidInRequestedCoin below refuses to make
+// on the same evidence — so it turned an unknown into a precise-looking
+// dollar figure and put it in front of the buyer. One rule, one answer: no
+// fiat figure, no number quoted.
 export function settledFiat(p) {
   const atFiat = num(p?.actually_paid_at_fiat);
-  if (atFiat > 0) return atFiat;
-  const paid = num(p?.actually_paid);
-  const asked = num(p?.pay_amount);
-  const price = num(p?.price_amount);
-  if (paid > 0 && asked > 0 && price > 0) return (paid / asked) * price;
-  return 0;
+  return atFiat > 0 ? atFiat : null;
 }
 
 // True when the deposit is denominated in the coin the invoice asked for.
 // A false here means "do not quote them a figure in pay_currency" — telling
 // someone who paid in ETH to send more SOL is worse than saying nothing.
+//
+// It takes evidence to answer true. `actually_paid_at_fiat` is the only
+// field that says what the deposit was worth independently of the coin the
+// invoice asked for; without it, "nothing contradicts it" is also "nothing
+// supports it", and the wrong-asset case — the one this exists for — is
+// exactly the one that arrives without a fiat figure to contradict.
 export function paidInRequestedCoin(p) {
   const atFiat = num(p?.actually_paid_at_fiat);
   const paid = num(p?.actually_paid);
   const asked = num(p?.pay_amount);
   const price = num(p?.price_amount);
   if (paid <= 0 || asked <= 0 || price <= 0) return false;
-  if (atFiat <= 0) return true; // nothing contradicts it
+  if (atFiat <= 0) return false; // no evidence either way — say nothing
   // If the fiat value of the deposit disagrees with what that many units of
   // pay_currency would be worth, a different asset arrived and was converted.
   const impliedFiat = (paid / asked) * price;
@@ -254,10 +302,14 @@ export function describeStatus(p, { currency } = {}) {
   if (GRANTS_ACCESS.has(s)) return { state: 'paid', message: 'Payment confirmed.' };
   if (SHORT.has(s)) {
     const cur = normalizeCurrency(currency ?? p?.price_currency ?? 'usd');
-    const owedFiat = Math.max(0, num(p?.price_amount) - settledFiat(p));
+    const settled = settledFiat(p);
+    const owedFiat = settled === null ? 0 : Math.max(0, num(p?.price_amount) - settled);
     // The shortfall is quoted in the order's own money, because that figure
-    // is true no matter which coin actually turned up. The coin amount is
-    // added only when the deposit really was in the coin they picked.
+    // is true no matter which coin actually turned up — but only when the
+    // provider said what the deposit was worth. Without that there is no
+    // shortfall to quote in any unit, so the wording below carries none. The
+    // coin amount is added only when the deposit really was in the coin they
+    // picked.
     if (owedFiat > 0) {
       const coin = String(p?.pay_currency ?? '').toUpperCase();
       const owedCoin = Math.max(0, num(p?.pay_amount) - num(p?.actually_paid));
@@ -269,11 +321,15 @@ export function describeStatus(p, { currency } = {}) {
         message: `Underpaid — ${formatAmount(owedFiat, cur)} of this order is still outstanding${inCoin}. Send the difference to the same address to complete it.`,
       };
     }
-    return { state: 'short', message: 'Underpaid — the amount received was below the order total.' };
+    return { state: 'short', message: 'Underpaid — the amount received was below the order total. Send the difference to the same address to complete it.' };
   }
   if (IN_FLIGHT.has(s)) return { state: 'pending', message: 'Confirming on-chain…' };
   if (DEAD.has(s)) return { state: 'dead', message: 'This payment did not complete.' };
-  return { state: 'pending', message: 'Confirming on-chain…' };
+  // A status none of the sets know (or none at all) is not an on-chain
+  // confirmation in progress — claiming one would tell the buyer the money
+  // is on its way when nothing here knows that. Neutral wording, still
+  // polled; the webhook side logs the status so it can be found.
+  return { state: 'pending', message: 'Checking on this payment…' };
 }
 
 // Crypto amounts are long and mostly zeros; 8 significant decimals is the

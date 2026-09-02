@@ -48,6 +48,15 @@ const fmtPrice = (amount, cur = PAGE_CURRENCY) => {
 // Product names and usernames are other people's text — escape everything
 // that rides into innerHTML, no exceptions.
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+// Sign out is a POST: the session cookie rides on cross-site GETs, so a
+// GET link could be fired by any third-party page (see api/auth/logout.js).
+const signOut = () => {
+  const f = document.createElement('form');
+  f.method = 'post';
+  f.action = '/auth/logout';
+  document.body.appendChild(f);
+  f.submit();
+};
 
 const ICON_CARD =
   '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/></svg>';
@@ -126,7 +135,7 @@ function renderAccount() {
   const badge = entitled.length ? `<span class="badge">${entitled.map((s) => esc(s.planName)).join(' · ')}</span>` : '';
   const links = `<a class="nav-link" href="/account">Account</a>${me.isOwner || me.seller ? '<a class="nav-link" href="/dashboard">Dashboard</a>' : ''}`;
   el.innerHTML = `${badge}${links}<span>@${esc(me.username ?? me.discordId)}</span><button class="btn-ghost" id="logout">Sign out</button>`;
-  $('#logout').onclick = () => (window.location.href = '/auth/logout');
+  $('#logout').onclick = signOut;
 }
 
 // The one accent phrase in the headline (optional, from plans.json).
@@ -201,7 +210,7 @@ function renderBrand() {
   // one) is ever shown — no stand-in logo. Hidden until Discord answers.
   // Selected by its own class: the shop view's .logo sits earlier in the DOM.
   const logo = $('.op-server-icon');
-  if (state.server?.iconUrl) {
+  if (state.server?.iconUrl && logo.dataset.failed !== state.server.iconUrl) {
     logo.src = state.server.iconUrl;
     logo.alt = state.server.name ?? '';
     logo.hidden = false;
@@ -292,8 +301,12 @@ function renderOptions() {
     // The parent row predates its options and is named after the product —
     // its option label is its cadence. Added options are named by the owner.
     const optName = opt.id === par.id ? (opt.lifetime ? 'Lifetime' : 'Monthly') : opt.name;
+    // The cadence suffix is dropped when the label already IS the cadence —
+    // "Lifetime (lifetime)" said the same word twice.
+    const cadence = opt.lifetime ? '(lifetime)' : `/ ${esc(opt.interval)}`;
+    const sameWord = String(optName).trim().toLowerCase() === (opt.lifetime ? 'lifetime' : String(opt.interval ?? '').toLowerCase());
     row.innerHTML = `
-      <span class="opt-name">${esc(optName)}<small>${opt.lifetime ? '(lifetime)' : `/ ${esc(opt.interval)}`}</small></span>
+      <span class="opt-name">${esc(optName)}${sameWord ? '' : `<small>${cadence}</small>`}</span>
       <span class="opt-price">${fmtPrice(opt.priceUsd)}</span>`;
     row.onclick = () => {
       state.planId = opt.id;
@@ -387,6 +400,16 @@ const COIN_LABEL = {
 };
 const coinLabel = (t) => COIN_LABEL[t] ?? t.toUpperCase();
 
+// What the browser is allowed to keep from a ?coins=1 answer. `ready:false`
+// and an empty list say the same thing — there is nothing here to pay with —
+// and neither is worth remembering: a half-configured store that finishes its
+// setup a minute later would still show an empty grid to a page that was
+// already open. null means "ask again on the next open".
+const coinsFromAnswer = (data) => {
+  const list = data && data.ready !== false && Array.isArray(data.coins) ? data.coins : [];
+  return list.length ? list : null;
+};
+
 async function renderCoinPicker() {
   const box = $('#coinpick');
   if (!box) return;
@@ -400,12 +423,33 @@ async function renderCoinPicker() {
   if (state.coins === null) {
     msg.textContent = 'Loading coins…';
     state.coins = [];
+    let failed = false;
+    let empty = false;
     try {
       const res = await fetch(`/api/checkout/crypto?coins=1&store=${encodeURIComponent(STORE_SLUG)}`);
+      if (!res.ok) throw new Error(String(res.status));
       const data = await res.json();
-      state.coins = Array.isArray(data.coins) ? data.coins : [];
+      state.coins = coinsFromAnswer(data);
+      // A 200 that carries nothing payable is as useless as no answer at all.
+      empty = state.coins === null;
     } catch {
-      state.coins = [];
+      // A transient failure must not leave the picker empty for the life of
+      // the page: forget the answer so the next open asks again.
+      state.coins = null;
+      failed = true;
+    }
+    if (failed || empty) {
+      grid.innerHTML = '';
+      msg.textContent = '';
+      const retry = document.createElement('button');
+      retry.type = 'button';
+      retry.className = 'btn-ghost';
+      retry.textContent = failed
+        ? 'Could not load coins — try again'
+        : 'No coins available right now — try again';
+      retry.onclick = () => render();
+      msg.append(retry);
+      return;
     }
     renderCoinPicker();
     return;
@@ -498,12 +542,18 @@ function renderCta() {
   btn.onclick = () => pay(btn, plan);
   area.append(btn);
   // One quiet, factual line under the buy action: renewing plans really can
-  // be cancelled from /account; lifetime plans really never bill again.
+  // be cancelled from /account; lifetime plans really never bill again. A
+  // crypto term is neither: there is no card to charge again, so the grant
+  // is a fixed term that simply ends — nothing renews and nothing is there
+  // to cancel. Promising "cancel anytime" on that rail would be a lie.
   const assure = document.createElement('p');
   assure.className = 'pay-assure';
+  const termDays = Number(plan.durationDays);
   assure.textContent = plan.lifetime
     ? 'One-time payment — no renewals, ever.'
-    : 'Cancel anytime from your account.';
+    : crypto
+      ? `One-time payment for ${termDays > 0 ? `${termDays} days` : 'a fixed term'} of access — nothing renews, nothing is charged again.`
+      : 'Cancel anytime from your account.';
   area.append(assure);
 }
 
@@ -993,7 +1043,9 @@ function render() {
   renderBrand();
   const shop = $('#shop');
   const card = document.querySelector('.order-card');
-  const multi = state.plans.length > 1;
+  // Products only, like main(): a one-product store whose product has price
+  // options must not grow an "All products" button leading to a one-card shop.
+  const multi = state.plans.filter((p) => !p.variantOf).length > 1;
   if (shop) shop.hidden = state.view !== 'shop';
   if (card) card.hidden = state.view === 'shop';
   // The checkout wrapper caps itself at 640px with its own padding; the shop
@@ -1049,7 +1101,7 @@ function hasSection(tab) {
 // and the score is whatever /api/plans counted — the client never computes an
 // average from the page it happens to be showing, because that would drift
 // from the truth the moment the list is paginated.
-const reviewState = { loaded: false, loading: false, cursor: null, more: false, rows: [], canWrite: false, mine: null };
+const reviewState = { loaded: false, loading: false, cursor: null, more: false, rows: [], canWrite: false, writeBlock: null, mine: null };
 
 const starRow = (n, cls = '') =>
   `<span class="shop-stars ${cls}" role="img" aria-label="${n} out of 5">` +
@@ -1093,6 +1145,9 @@ async function loadReviews(force = false) {
     reviewState.cursor = data.cursor ?? null;
     reviewState.more = Boolean(data.more);
     reviewState.mine = reviewState.rows.find((x) => x.mine) ?? null;
+    // Whether THIS viewer may post, decided by the same gate the write hits.
+    reviewState.canWrite = Boolean(data.canWrite);
+    reviewState.writeBlock = data.writeBlock ?? null;
     reviewState.loaded = true;
   } catch {
     // A storefront that cannot reach the review feed still sells products.
@@ -1164,6 +1219,19 @@ function renderMyReview() {
     $('#rv-del').onclick = async () => {
       await postReview({ action: 'withdraw' });
     };
+    return;
+  }
+  // No review yet and the server says this viewer cannot write one: a buyer
+  // inside the cooling window or someone who never bought gets the reason in
+  // the server's own words; the seller (who cannot rate their own store) and
+  // anyone else get nothing rather than a form that 403s.
+  if (!mine && !reviewState.canWrite) {
+    const why = {
+      notbuyer: 'Only people who bought from this store can review it.',
+      cooling: 'Reviews open three days after your purchase — give it a proper go first.',
+    }[reviewState.writeBlock];
+    box.hidden = !why;
+    if (why) box.innerHTML = `<p class="shop-rvform-note">${esc(why)}</p>`;
     return;
   }
   const pick = Number(box.dataset.pick ?? mine?.rating ?? 0);
@@ -1332,14 +1400,16 @@ function renderShop() {
   const icon = $('#shop-icon');
   const iconPh = $('#shop-icon-ph');
   if (!icon || !iconPh) return;
-  if (state.server?.iconUrl) {
+  // The letter is always ready: the image's onerror swaps to it mid-render,
+  // and a url that already failed counts as no icon on every later render.
+  iconPh.textContent = (name || '?').slice(0, 1).toUpperCase();
+  if (state.server?.iconUrl && icon.dataset.failed !== state.server.iconUrl) {
     icon.src = state.server.iconUrl;
     icon.hidden = false;
     iconPh.hidden = true;
   } else {
     icon.hidden = true;
     iconPh.hidden = false;
-    iconPh.textContent = (name || '?').slice(0, 1).toUpperCase();
   }
   $('#shop-name').textContent = name;
 

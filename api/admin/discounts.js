@@ -13,8 +13,8 @@ export default guard(async function handler(req, res) {
     sendText(res, 405, 'method not allowed');
     return;
   }
-  const uid = sessionUserId(req);
-  if (!uid && !ownerAuthorized(req)) {
+  const uid = await sessionUserId(req);
+  if (!uid && !await ownerAuthorized(req)) {
     sendJson(res, 401, { error: 'sign in first' });
     return;
   }
@@ -24,7 +24,7 @@ export default guard(async function handler(req, res) {
     sendJson(res, 404, { error: 'unknown store' });
     return;
   }
-  if (!(ownerAuthorized(req) || (store.ownerDiscordId && store.ownerDiscordId === uid))) {
+  if (!(await ownerAuthorized(req) || (store.ownerDiscordId && store.ownerDiscordId === uid))) {
     sendJson(res, 403, { error: 'not your store' });
     return;
   }
@@ -44,7 +44,14 @@ export default guard(async function handler(req, res) {
         sendJson(res, 409, { error: 'That code already exists.' });
         return;
       }
-      const kind = body.kind === 'fixed' ? 'fixed' : 'percent';
+      // Exactly one of the two kinds, or the default. Anything else — 'FIXED'
+      // from a hand-written client, a typo in an integration — used to fall
+      // through to percent, and "$50 off" was booked as "50% off" with a 200.
+      const kind = body.kind === undefined || body.kind === null || body.kind === '' ? 'percent' : body.kind;
+      if (kind !== 'fixed' && kind !== 'percent') {
+        sendJson(res, 400, { error: "A discount is either 'percent' or 'fixed'." });
+        return;
+      }
       // A fixed discount is denominated in the store's currency, so it rounds
       // and bounds by that currency — not by cents and dollars.
       const dcur = normalizeCurrency(store.currency);

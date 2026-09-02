@@ -15,6 +15,7 @@ import me from '../api/me.js';
 import authLogin from '../api/auth/login.js';
 import authCallback from '../api/auth/callback.js';
 import authLogout from '../api/auth/logout.js';
+import authLogoutAll from '../api/auth/logout-all.js';
 import checkoutStripe from '../api/checkout/stripe.js';
 import checkoutCoinbase from '../api/checkout/coinbase.js';
 import checkoutCrypto from '../api/checkout/crypto.js';
@@ -43,6 +44,7 @@ import discount from '../api/discount.js';
 import storePage from '../api/store-page.js';
 import follow from '../api/follow.js';
 import reviews from '../api/reviews.js';
+import community from '../api/community.js';
 
 const PUBLIC_DIR = path.join(config.root, 'public');
 const MIME = {
@@ -81,6 +83,7 @@ const routes = {
   '/auth/callback': authCallback,
   '/api/auth/logout': authLogout,
   '/auth/logout': authLogout,
+  '/api/auth/logout-all': authLogoutAll,
   '/api/checkout/stripe': checkoutStripe,
   '/api/checkout/coinbase': checkoutCoinbase,
   '/api/checkout/crypto': checkoutCrypto,
@@ -111,6 +114,7 @@ const routes = {
   '/api/discount': discount,
   '/api/follow': follow,
   '/api/reviews': reviews,
+  '/api/community': community,
 };
 
 const server = http.createServer(async (req, res) => {

@@ -19,7 +19,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -48,6 +48,7 @@ const R2_VIP = '2200000000000000101';      // grantable role in G2
 const R2_BOT = '2200000000000000999';      // the bot's role in G2
 const OWNER2_KEY = 'rk_test_owner2';       // second owner's own Stripe key — restricted, the kind Stripe recommends
 const RESEND_KEY = 're_e2e_1234567890';
+const COMMUNITY_INVITE = 'https://discord.gg/e2e-community'; // one setting; these are its request-time readers (site hop + receipt footer)
 const R_BOT = '1200000000000000999';
 const R_ADMIN = '1200000000000000555';   // above the bot — must be flagged unusable
 const R_NEW = '1200000000000000200';     // below the bot — pickable
@@ -69,7 +70,12 @@ const discord = {
   botInG2: false,               // the invite step flips this
   userGuilds: {},               // uid -> guilds visible to /users/@me/guilds
   failRolesFetchOnce: false,    // next GET /guilds/:id/roles answers 500
+  failMemberGetsFor: new Set(), // uids whose GET member answers 500 — Discord down, not "they left"
   extraRoles: [],               // appended to the role list (e.g. a same-named decoy)
+  kickedFrom: null,             // a guild id the bot was removed from: every guild route answers as Discord does then
+  kickedMemberGets: 0,          // GET member calls that hit the kicked guild
+  phantomJoinsFor: new Set(),   // uids whose guilds.join answers 204 "already a member" while GET member keeps 404ing
+  phantomJoins: 0,
   oauthUsers: {
     code_u1: { id: U1, username: 'trader_one' },
     code_u3: { id: U3, username: 'trader_three' },
@@ -84,6 +90,9 @@ const stripe = {
   failSubFetchOnce: new Set(),  // subscription ids whose next GET answers 500
   subFetches: {},               // subscription id -> fetch count
   failCheckoutSessionsWith: null, // when set, POST /v1/checkout/sessions answers 400 with this message
+  delayCheckoutSessionsMs: 0,   // how long POST /v1/checkout/sessions takes to answer — the window a
+                                // checkout's reservation has to survive, and what makes the two-buyers
+                                // -at-once scenario a real race rather than a coincidence
   charges: {},                  // charge id -> { payment_intent, invoice } for refund/dispute lookups
   invoices: {},                 // invoice id -> { subscription }
   subDeletes: [],               // DELETE /v1/subscriptions/:id calls (platform-plan switches/cancels)
@@ -102,7 +111,7 @@ const AUTO_ENDPOINT_SECRET = 'whsec_auto_e2e_secret_1';
 const coinbase = { charges: [] };
 // NOWPayments: the crypto rail. `payments` is mutable so a test can advance a
 // payment through its statuses the way the real provider would.
-const nowpayments = { created: [], payments: new Map(), n: 0 };
+const nowpayments = { created: [], payments: new Map(), n: 0, minAmount: [], delayCreateMs: 0 };
 const NOW_KEY = 'np_key_e2e';
 const NOW_IPN_SECRET = 'np_ipn_secret_e2e';
 const resend = { emails: [] };
@@ -188,6 +197,21 @@ async function discordHandler(req, res) {
   const p = url.pathname;
   let m;
 
+  // The bot was kicked from this guild (or the server was deleted): Discord
+  // answers 404 Unknown Guild (10004) on its guild routes and 403 Missing
+  // Access (50001) to guilds.join — the same shape whether or not the BUYER
+  // is in the server, which is exactly what the app must not misread.
+  if ((m = p.match(/^\/guilds\/([^/]+)/)) && discord.kickedFrom && m[1] === discord.kickedFrom) {
+    const memberRoute = /^\/guilds\/[^/]+\/members\/[^/]+$/.test(p);
+    if (memberRoute && req.method === 'PUT') {
+      json(res, 403, { message: 'Missing Access', code: 50001 });
+      return;
+    }
+    if (memberRoute && req.method === 'GET') discord.kickedMemberGets++;
+    json(res, 404, { message: 'Unknown Guild', code: 10004 });
+    return;
+  }
+
   if ((m = p.match(/^\/guilds\/([^/]+)\/members\/([^/]+)\/roles\/([^/]+)$/)) && (req.method === 'PUT' || req.method === 'DELETE')) {
     const [, , uid, roleId] = m;
     if (discord.rateLimit429Remaining > 0) {
@@ -229,6 +253,13 @@ async function discordHandler(req, res) {
   if ((m = p.match(/^\/guilds\/([^/]+)\/members\/([^/]+)$/)) && req.method === 'PUT') {
     const [, , uid] = m;
     const body = JSON.parse(await readBody(req));
+    // 204 "already a member" from a guild whose member fetch still says 404:
+    // a consistency window the app must survive without spinning.
+    if (discord.phantomJoinsFor.has(uid)) {
+      discord.phantomJoins++;
+      res.writeHead(204).end();
+      return;
+    }
     if (discord.members.has(uid)) {
       res.writeHead(204).end();
       return;
@@ -246,8 +277,14 @@ async function discordHandler(req, res) {
   }
   if ((m = p.match(/^\/guilds\/([^/]+)\/members\/([^/]+)$/)) && req.method === 'GET') {
     const [, , uid] = m;
+    // Discord failing to answer. Deliberately NOT a 404: the whole point is
+    // that "we could not ask" and "they are not a member" are different.
+    if (discord.failMemberGetsFor.has(uid)) {
+      json(res, 500, { message: 'mock: discord is having a moment' });
+      return;
+    }
     if (!discord.members.has(uid)) {
-      json(res, 404, { message: 'Unknown Member' });
+      json(res, 404, { message: 'Unknown Member', code: 10007 });
       return;
     }
     json(res, 200, { user: { id: uid }, roles: [...discord.members.get(uid)] });
@@ -512,6 +549,7 @@ async function stripeHandler(req, res) {
       return;
     }
     const form = Object.fromEntries(new URLSearchParams(await readBody(req)));
+    if (stripe.delayCheckoutSessionsMs) await sleep(stripe.delayCheckoutSessionsMs);
     stripe.checkoutSessions.push(form);
     json(res, 200, { id: `cs_${stripe.checkoutSessions.length}`, url: `https://stripe.mock/pay/cs_${stripe.checkoutSessions.length}` });
     return;
@@ -577,11 +615,35 @@ async function nowpaymentsHandler(req, res) {
   }
   if (url.pathname === '/merchant/coins' && req.method === 'GET') {
     // Deliberately UPPERCASE: tickers are compared lowercase everywhere, and
-    // the provider is not consistent about which it sends.
-    json(res, 200, { selectedCurrencies: ['BTC', 'SOL', 'USDTSOL', 'ETH'] });
+    // the provider is not consistent about which it sends. XMR is enabled for
+    // DEPOSITS only — see validate-address below — which is the case the
+    // payout gate must not confuse with "available for payouts".
+    json(res, 200, { selectedCurrencies: nowpayments.noCoins ? [] : ['BTC', 'SOL', 'USDTSOL', 'ETH', 'XMR'] });
+    return;
+  }
+  if (url.pathname === '/payout/validate-address' && req.method === 'POST') {
+    // The provider's own answer to "can this coin be paid out to this
+    // address". Its success body is a bare OK, not JSON — documented, and
+    // exactly the kind of thing a shared JSON fetch helper trips over.
+    const body = JSON.parse(await readBody(req));
+    (nowpayments.validated ??= []).push(body);
+    const shape = {
+      btc: /^(1|3)[1-9A-HJ-NP-Za-km-z]{25,34}$|^bc1[02-9ac-hj-np-z]{8,87}$/,
+      ltc: /^[LM][1-9A-HJ-NP-Za-km-z]{25,34}$|^ltc1[02-9ac-hj-np-z]{8,87}$/,
+      sol: /^[1-9A-HJ-NP-Za-km-z]{32,44}$/,
+      usdtsol: /^[1-9A-HJ-NP-Za-km-z]{32,44}$/,
+      eth: /^0x[0-9a-fA-F]{40}$/,
+    }[String(body.currency).toLowerCase()];
+    if (!shape || !shape.test(String(body.address))) {
+      json(res, 400, { status: false, statusCode: 400, code: 'BAD_CREATE_WITHDRAWAL_REQUEST', message: `Invalid payout_address: ${body.currency} ${body.address}` });
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end('OK');
     return;
   }
   if (url.pathname === '/min-amount' && req.method === 'GET') {
+    nowpayments.minAmount.push({ from: url.searchParams.get('currency_from'), to: url.searchParams.get('currency_to') });
     json(res, 200, { min_amount: 0.004, currency_from: url.searchParams.get('currency_from') });
     return;
   }
@@ -591,6 +653,7 @@ async function nowpaymentsHandler(req, res) {
       json(res, 400, { message: 'Amount is too small: minimal amount is 1' });
       return;
     }
+    if (nowpayments.delayCreateMs) await sleep(nowpayments.delayCreateMs);
     nowpayments.created.push(body);
     const id = `npid_${++nowpayments.n}`;
     const payment = {
@@ -800,6 +863,17 @@ async function spawnApp(env) {
   return { child, log, url: `http://127.0.0.1:${port}` };
 }
 
+// A session cookie is checked against the account row of the deployment that
+// reads it, so a scenario that spawns an app on its OWN database (SQLite
+// mode) signs in there instead of carrying the phase-1 cookie across.
+async function signInOn(base, code) {
+  const login = await fetch(`${base}/auth/login`, { redirect: 'manual' });
+  const state = new URL(login.headers.get('location')).searchParams.get('state');
+  const stateCookie = login.headers.getSetCookie().find((c) => c.startsWith('tl_oauth_state=')).split(';')[0];
+  const cb = await fetch(`${base}/auth/callback?code=${code}&state=${state}`, { redirect: 'manual', headers: { cookie: stateCookie } });
+  return cb.headers.getSetCookie().find((c) => c.startsWith('tl_session=')).split(';')[0];
+}
+
 const baseEnv = (mocks) => ({
   ENV_PATH: '/nonexistent/.env', // a developer's real .env must never leak in
   PLANS_PATH,
@@ -824,6 +898,7 @@ const baseEnv = (mocks) => ({
   ROLE_CACHE_SECONDS: '0', // every resolution refetches, so a scenario can swap a guild's role list and be seen at once
   RESEND_API_KEY: RESEND_KEY,
   RESEND_API_BASE: mocks.resend.url,
+  COMMUNITY_INVITE: COMMUNITY_INVITE,
 });
 
 // ── tiny sequential harness ───────────────────────────────────────────────────
@@ -903,7 +978,9 @@ test('storefront serves the tenant-generic checkout, plans API exposes capabilit
   assert.match(diagBody, /Confirm Order/, 'unclaimed slugs serve the storefront shell');
   // `currency` rides beside priceUsd on every plan: the number alone cannot
   // say whether 1500 is $1,500.00 or ¥1,500, and the storefront formats from it.
-  assert.deepEqual(Object.keys(plans[0]).sort(), ['currency', 'description', 'descriptionHighlight', 'expiresAt', 'id', 'imageUrl', 'interval', 'lifetime', 'linkSlug', 'mediaKind', 'name', 'priceUsd', 'requiredRoleName', 'roleNames', 'variantOf']);
+  // `durationDays` rides beside them for the same reason: the crypto rail has
+  // no renewal to point at, so the pay screen has to name the term itself.
+  assert.deepEqual(Object.keys(plans[0]).sort(), ['currency', 'description', 'descriptionHighlight', 'durationDays', 'expiresAt', 'id', 'imageUrl', 'interval', 'lifetime', 'linkSlug', 'mediaKind', 'name', 'priceUsd', 'requiredRoleName', 'roleNames', 'variantOf']);
   assert.equal(plans[0].currency, 'usd', 'a store that never picked a currency prices in USD, exactly as before');
 });
 
@@ -955,6 +1032,46 @@ test('the iOS status-bar strip is on every themed page, with both of its colours
     /<meta name="viewport" content="[^"]*viewport-fit=cover[^"]*"/,
     'a store page must opt into the safe area or its pay button sits under the browser bar',
   );
+});
+
+test('night: the small copy on the open sky rides navy glass on both marketing pages', async () => {
+  // The night face puts eyebrows, notes and the hero sub straight over the
+  // procedural cloud canvas. A text-shadow and lighter greys got the medians
+  // past 4.5:1, but a bright cloud body behind the copy still measured 3.0–4.0
+  // at the 5th percentile (worst: the payment note and the /pricing eyebrow),
+  // and the clouds drift, so any placement is only luck. Dimming the whole sky
+  // enough to fix it would need ~55% black. Instead the copy sits on the same
+  // navy glass the plan cards already use — eyebrow chips at .74 (the blue is
+  // darker than the greys), plates and the payment panel at .62, a .5 vignette
+  // behind the hero copy — every rule scoped to the night face, so the day
+  // face is untouched. Measured after: every element 6.9:1+ at the 5th
+  // percentile at 390 and 1440. This holds the rules in place.
+  const glass = /html:not\(\[data-theme="light"\]\) \.sec-eyebrow\{display:inline-block;[^}]*background:rgba\(13,20,32,\.74\)/;
+  const vignette = /radial-gradient\(ellipse 50% 50% at 50% 50%,rgba\(13,20,32,\.5\) 0,rgba\(13,20,32,\.5\) 55%,rgba\(13,20,32,0\) 100%\)/;
+  const home = await (await fetch(`${appUrl}/`)).text();
+  assert.match(home, glass, '/ eyebrows must sit on a night chip');
+  assert.match(home, /html:not\(\[data-theme="light"\]\) \.mid-note,html:not\(\[data-theme="light"\]\) \.save-demo\{[^}]*background:rgba\(13,20,32,\.62\)/, '/ notes must sit on a night plate');
+  assert.match(home, /html:not\(\[data-theme="light"\]\) \.pay\{[^}]*background:rgba\(13,20,32,\.62\)/, '/ payment band must be a night panel');
+  assert.match(home, /html:not\(\[data-theme="light"\]\) \.hero-core::before\{[^}]*\}/, '/ hero copy must have its night vignette');
+  assert.match(home, vignette, '/ vignette must keep its soft plateau');
+  const pricing = await (await fetch(`${appUrl}/pricing`)).text();
+  assert.match(pricing, glass, '/pricing eyebrow must sit on a night chip');
+  assert.match(pricing, /html:not\(\[data-theme="light"\]\) \.fees-note,html:not\(\[data-theme="light"\]\) \.faq-cta \.microcopy\{[^}]*background:rgba\(13,20,32,\.62\)/, '/pricing notes must sit on a night plate');
+  assert.match(pricing, /html:not\(\[data-theme="light"\]\) \.page-hero::before\{[^}]*\}/, '/pricing hero copy must have its night vignette');
+  assert.match(pricing, vignette, '/pricing vignette must keep its soft plateau');
+  // and none of it leaks into the day face: every selector the block adds is
+  // scoped to html:not([data-theme="light"]).
+  for (const [path, html] of [['/', home], ['/pricing', pricing]]) {
+    const start = html.indexOf('/* Night, the rest of it:');
+    const block = html.slice(start, html.indexOf(path === '/' ? '.sky-card b{' : '.fee-chip{', start));
+    assert.ok(block.length > 200 && block.length < 6000, `${path} night block must sit where it was written`);
+    for (const line of block.replace(/\/\*[\s\S]*?\*\//g, '').split('\n')) {
+      const t = line.trim();
+      if (!t || /^[a-z-]+:|^\}$/.test(t)) continue;
+      if (t.startsWith('@media')) assert.match(t, /^@media \([^)]*\)\{html:not\(\[data-theme="light"\]\)/, `${path}: ${t.slice(0, 60)} must be night-scoped`);
+      else assert.match(t, /^html:not\(\[data-theme="light"\]\)/, `${path}: ${t.slice(0, 60)} must be night-scoped`);
+    }
+  }
 });
 
 test('the favicon is square, big enough for search surfaces, and at a url that does not move', async () => {
@@ -1024,59 +1141,368 @@ test('the favicon is square, big enough for search surfaces, and at a url that d
       [],
       `${path} must not put a version query on an icon url`,
     );
+    // The superseded "multiple of 48" rule was corrected in the generator's
+    // favicon script and here, but the head comment the SEO generator stamps
+    // into 45 public pages kept quoting it as what Google requires. A
+    // policy claim the repo knows is false must not ship in served HTML.
+    assert.doesNotMatch(html, /multiples? of 48|what Google requires/, `${path} must not quote the superseded favicon rule`);
   }
 });
 
-test('the free look: colours on every plan, wallpapers on a paid one', async () => {
+test('the free look: every background on every plan, an imported URL on a paid one', async () => {
   const theme = await import('../src/lib/theme.js');
-  // The split has to mean the same thing in three places or it is not a split:
-  // the server that strips a look, the picker that offers one, and the page
-  // that sells the difference.
-  assert.equal(theme.FREE_BG_PRESETS.length, 10, 'ten plain gradient grounds are free');
-  for (const id of theme.FREE_BG_PRESETS) {
-    assert.equal(theme.usesPaidLook({ bgPreset: id }), false, `${id} must be free`);
+  // The line has to fall in the same place in three places or it is not a
+  // line: the server that strips a look, the picker that offers one, and the
+  // page that sells the difference.
+  const total = Object.keys(theme.BG_PRESETS).length;
+  assert.equal(theme.FREE_BG_PRESETS.length, total, 'every preset in the catalogue is free');
+  for (const id of Object.keys(theme.BG_PRESETS)) {
+    assert.equal(theme.usesPaidLook({ bgPreset: id }), false, `${id} must be free — the catalogue is served from this origin`);
   }
-  for (const id of ['starfield', 'aurora', 'clouds-day', 'mountains', 'rain']) {
-    assert.equal(theme.usesPaidLook({ bgPreset: id }), true, `${id} is a wallpaper and must need a plan`);
-  }
-  assert.equal(theme.usesPaidLook({ bgUrl: 'https://example.com/a.gif' }), true, 'an import is a wallpaper');
+  assert.equal(theme.usesPaidLook({ bgUrl: 'https://example.com/a.gif' }), true, "an image from the seller's own host is the paid part");
   assert.equal(theme.usesPaidLook({ bg: '#0a0a0a', accent: '#ededed', radius: 4 }), false, 'colours alone are free');
 
   // Stripping keeps everything a free store is entitled to and nothing more.
   const stripped = theme.freeLook({ bg: '#123456', panel: '#222222', text: '#ffffff', accent: '#ff0000',
     pay: '#5865f2', radius: 8, font: 'serif', material: 'liquid', bgPreset: 'starfield', bgUrl: 'https://e.com/x.mp4' });
   assert.deepEqual(stripped, { bg: '#123456', panel: '#222222', text: '#ffffff', accent: '#ff0000',
-    pay: '#5865f2', radius: 8, font: 'serif', material: 'liquid' }, 'colours survive, wallpapers do not');
-  assert.deepEqual(theme.freeLook({ bg: '#000000', bgPreset: 'denim' }), { bg: '#000000', bgPreset: 'denim' },
-    'a free gradient ground is left alone');
+    pay: '#5865f2', radius: 8, font: 'serif', material: 'liquid', bgPreset: 'starfield' },
+    'the whole look survives a lapsed plan; only the import does not');
+  assert.deepEqual(theme.freeLook({ bg: '#000000', bgPreset: 'clouds-day' }), { bg: '#000000', bgPreset: 'clouds-day' },
+    'a photographic ground is left alone');
 
-  // The picker's copy of the list must not drift from the server's.
+  // The picker must not lock what the server serves to everyone.
   const dash = fs.readFileSync(new URL('../public/dashboard.js', import.meta.url), 'utf8');
   const catalogue = dash.match(/const BG_CATALOG = \[[\s\S]*?\n\];/)[0];
-  const flagged = [...catalogue.matchAll(/\{ id: '([a-z0-9-]+)'[^}]*free: true/g)].map((m) => m[1]).sort();
-  assert.deepEqual(flagged, [...theme.FREE_BG_PRESETS].sort(),
-    'dashboard BG_CATALOG free flags must match FREE_BG_PRESETS');
+  const ids = [...catalogue.matchAll(/\{ id: '([a-z0-9-]+)'/g)].map((m) => m[1]).sort();
+  assert.deepEqual(ids, [...theme.FREE_BG_PRESETS].sort(), 'the picker and the server must offer the same catalogue');
+  assert.doesNotMatch(catalogue, /free:\s*true/, 'no entry needs a free flag any more — they all are');
+  assert.doesNotMatch(dash, /bgp-lock">Pro/, 'no wallpaper tile may wear a Pro lock');
 
-  // And the price page must advertise the deal Free actually gets. Pinned to
-  // the NUMBERS rather than a sentence: the old assertion matched one exact
-  // marketing string, so it failed on a copy edit that changed nothing about
-  // what a seller receives, while it would have sat green through the free
-  // preset list doubling. What must not drift is the count.
+  // And the price page must advertise the deal Free actually gets.
   const pricing = fs.readFileSync(new URL('../public/pricing.html', import.meta.url), 'utf8');
-  const total = Object.keys(theme.BG_PRESETS).length;
-  const freeCount = theme.FREE_BG_PRESETS.length;
-  // Split on the card openings rather than trying to match balanced divs — a
-  // non-greedy </div></div> stops at the first NESTED pair, which silently
-  // truncated every card before its .plan-look line.
   const cards = pricing.split(/<div class="plan(?: plan-pop)?">/).slice(1);
   const freeCard = cards.find((c) => /<b>Free<\/b>/.test(c));
   assert.ok(freeCard, 'the pricing page must still have a Free card');
   const freeLook = freeCard.match(/class="plan-look">([^<]*)</)?.[1] ?? '';
-  assert.match(freeLook, new RegExp(`\\b${freeCount}\\b`), `Free must advertise its ${freeCount} backgrounds, not a different number`);
-  assert.doesNotMatch(freeLook, new RegExp(`\\b${total}\\b`), 'Free must not be promised the full catalogue');
+  assert.match(freeLook, new RegExp(`\\b${total}\\b`), `Free gets all ${total} backgrounds and the page must say so`);
   const paid = cards.filter((c) => !/<b>Free<\/b>/.test(c)).map((c) => c.match(/class="plan-look">([^<]*)</)?.[1] ?? '');
-  assert.ok(paid.length >= 2 && paid.every((t) => new RegExp(`\\b${total}\\b`).test(t)),
-    `every paid plan must advertise all ${total} backgrounds`);
+  assert.ok(paid.length >= 2 && paid.every((t) => new RegExp(`\\b${total}\\b`).test(t) && /URL/i.test(t)),
+    `every paid plan advertises all ${total} backgrounds plus the import`);
+});
+
+test('landing polish holds: one gutter, centred community CTA, Cash App logotype, comments that match the code', () => {
+  // Each of these was a real regression on the landing page and every one is
+  // invisible to the HTTP-level scenarios, so they are pinned at the source.
+  const index = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const pricing = fs.readFileSync(new URL('../public/pricing.html', import.meta.url), 'utf8');
+  const css = index.slice(index.indexOf('<style>'), index.indexOf('</style>'));
+
+  // ONE gutter, on BOTH pages, at EVERY width. .wrap declares it; the sections
+  // kept overriding it with a padding SHORTHAND, which silently resets
+  // padding-inline, so their cards sat outside the sticky logo above and the
+  // FAQ below. The first fix only cleaned the desktop rules on index, which
+  // left the same 4px step in the <=600px block, the payment strip 24px proud
+  // of everything on tablets, and /pricing untouched. So walk every .wrap
+  // section on both pages and every rule that targets one — media copies
+  // included — and let nothing name a horizontal padding.
+  const gutters = {};
+  for (const [name, html] of [['index', index], ['pricing', pricing]]) {
+    const sheet = html.slice(html.indexOf('<style>'), html.indexOf('</style>'));
+    const desktop = sheet.match(/^\.wrap\{[^}]*padding-inline:(\d+px)/m)?.[1];
+    const phone = sheet.match(/@media \(max-width:600px\)\{[\s\S]*?\n\s*\.wrap\{padding-inline:(\d+px)\}/)?.[1];
+    assert.ok(desktop && phone, `${name}: .wrap declares the gutter as padding-inline at both widths`);
+    gutters[name] = `${desktop}/${phone}`;
+    // every section that opts into .wrap, read off the markup so a new one
+    // cannot be added without being covered here.
+    const secs = [...html.matchAll(/class="(?:([a-z-]+) wrap|wrap ([a-z-]+))"/g)].map((m) => m[1] || m[2]);
+    assert.ok(secs.length >= 4, `${name}: found the .wrap sections (${secs.length})`);
+    for (const sec of new Set(secs)) {
+      // rules whose selector IS the section — a compound like
+      // `html:not([data-theme="light"]) .pay` is a deliberate card treatment
+      // with its own geometry, not the page gutter, so it is left alone.
+      const rules = [...sheet.matchAll(new RegExp(`(?:^|[{,])\\s*\\.${sec}\\{([^}]*)\\}`, 'gm'))];
+      assert.ok(rules.length, `${name}: .${sec} still has a rule`);
+      for (const r of rules) {
+        assert.doesNotMatch(r[1], /(^|;)\s*padding(-inline|-left|-right)?\s*:/,
+          `${name}: .${sec} must not reset .wrap's ${gutters[name]} gutter — use padding-block`);
+      }
+    }
+  }
+  assert.equal(gutters.index, gutters.pricing, 'the landing and /pricing share one gutter at both widths');
+  // the payment strip sits between .why and .how; it is only in line with them
+  // because it is a .wrap too, not because it repeats the number.
+  assert.match(index, /<section class="pay wrap">/, 'the payment strip takes its gutter from .wrap');
+
+  // The community card centres everything; its one CTA is inside a flex row
+  // with no justify-content, so it pinned to flex-start under centred copy.
+  assert.match(css, /^\.comm-cta-row\{[^}]*justify-content:center/m, 'the community CTA row centres its button');
+  // The right-aligned note beside "What sellers say." orphaned its last word.
+  assert.match(css, /^\.mid-note\{[^}]*text-wrap:balance/m, '.mid-note balances its two lines');
+
+  // Cash App is the only white-on-brand-green logotype in the strip. Its size
+  // was set on a lone class, which .pay-chip b (0,1,1) outranks, so the rule
+  // never applied and the least legible chip was also the smallest.
+  const base = parseFloat(css.match(/^\.pay-chip b\{[^}]*font-size:([\d.]+)px/m)[1]);
+  const cash = css.match(/^\.pm-cashchip b\{([^}]*)\}/m);
+  assert.ok(cash, 'the Cash App logotype is styled through .pm-cashchip b, which can win');
+  assert.ok(parseFloat(cash[1].match(/font-size:([\d.]+)px/)[1]) >= base, 'Cash App is at least as large as the other chips');
+  assert.match(cash[1], /white-space:nowrap/, 'the two-word logotype never breaks across lines');
+  assert.doesNotMatch(css, /^\.pm-cash-ink\{/m, 'no dead lone-class rule for the Cash App text');
+
+  // Comment / code agreement in the two copies of the theme-color and footer
+  // scripts. The comment above tintWant() must name the token the code reads
+  // (--foot-edge, the painted edge; --foot-end is the nominal stop that leaves
+  // a seam), and the stale "svh, NOT lvh" paragraph — which told the next
+  // person to undo the guard two lines below it — must stay deleted.
+  for (const [name, html] of [['index', index], ['pricing', pricing]]) {
+    const at = html.indexOf('var tintWant');
+    assert.ok(at > 0, `${name}: tintWant present`);
+    const above = html.slice(at - 900, at);
+    const body = html.slice(at, at + 400);
+    assert.match(body, /'--foot-edge'/, `${name}: tintWant reads --foot-edge`);
+    assert.match(above, /--foot-edge is the colour/, `${name}: the comment names the token the code reads`);
+    assert.doesNotMatch(above, /--foot-end is the colour/, `${name}: the comment must not name the nominal stop as the answer`);
+    assert.doesNotMatch(html, /svh, NOT lvh/, `${name}: the stale svh-vs-lvh comment is gone`);
+    assert.match(html, /h > largeVh\(\) - 8/, `${name}: the fit guard measures against lvh`);
+  }
+  // The two copies of the viewport-probe block must not drift apart.
+  const probe = (s) => s.slice(s.indexOf('// the LARGE viewport height'), s.indexOf('var largeVh = function'));
+  assert.ok(probe(index).length > 200, 'index carries the viewport probe block');
+  assert.equal(probe(index), probe(pricing), 'index and pricing share one viewport-probe block, comments included');
+});
+
+test('one nav: every page in the site shows the same header links, in the same order', () => {
+  // The site grew three different desktop navs. The landing and /pricing had
+  // Pricing / Discover / Invite Dues; the SEO and legal pages had
+  // Discover / Pricing / Compare / Tools; /discover alone had a "Features" link
+  // pointing at a fragment of another page. Moving between pages swapped the
+  // item set and the order, and two of the four hubs were unreachable from the
+  // highest-authority page on the site. The SEO set won: it names the four
+  // hubs that exist as real routes, and it is the set the ~40 generated pages
+  // carry, so adopting it costs the landing only a nav-level invite link that
+  // the community section already repeats. This walks every page AND the
+  // generator that writes most of them, so a new page cannot invent a fourth.
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  const walk = (dir) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+    e.isDirectory() ? walk(path.join(dir, e.name))
+      : e.name.endsWith('.html') ? [path.join(dir, e.name)] : []);
+  const NAV = /<div class="nav-links">([\s\S]*?)<\/div>|<nav class="top-center"[^>]*>([\s\S]*?)<\/nav>|<nav class="mobile-menu"[^>]*>([\s\S]*?)<\/nav>/g;
+  const linksOf = (block) => [...block.matchAll(/<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g)]
+    .map((m) => `${m[2].replace(/<[^>]*>/g, '').trim()} -> ${m[1]}`).join(' | ');
+  const CANON = 'Discover -> /discover | Pricing -> /pricing | Compare -> /vs | Tools -> /tools';
+  const files = [...walk(path.join(root, 'public')), path.join(root, 'scripts/gen-seo-pages.mjs')];
+  let navs = 0;
+  for (const f of files) {
+    for (const m of fs.readFileSync(f, 'utf8').matchAll(NAV)) {
+      const links = linksOf(m[1] ?? m[2] ?? m[3]);
+      if (!links) continue;                       // an empty shell, e.g. a JS-filled menu
+      navs++;
+      assert.equal(links, CANON, `${path.relative(root, f)} carries its own nav`);
+    }
+  }
+  assert.ok(navs >= 40, `every page's nav was inspected (${navs})`);
+});
+
+test('dashboard: MRR is a monthly rate, a flat product reads flat, and the black face holds on every route', async () => {
+  // The dashboard renders on the client, which this suite does not run. These
+  // are the pure functions it reads its money and growth figures with, lifted
+  // out of the file by shape and executed as written.
+  const dash = fs.readFileSync(new URL('../public/dashboard.js', import.meta.url), 'utf8');
+  const lift = (name, re, ...args) => {
+    const src = dash.match(re)?.[0];
+    assert.ok(src, `dashboard.js must still define ${name}`);
+    return new Function(...args, `${src}\n return ${name};`);
+  };
+
+  // A $600 yearly plan is $50 of monthly recurring revenue, not $600; a
+  // quarterly one is a third; a weekly one is a bit over four weeks' worth. No
+  // term and a monthly term stay as they are.
+  const monthlyRate = lift('monthlyRate', /const TERM_MONTHS = [\s\S]*?\nfunction monthlyRate\(p\) \{[\s\S]*?\n\}/)();
+  assert.equal(monthlyRate({ amountUsd: 600, durationDays: 365 }), 50);
+  assert.equal(monthlyRate({ amountUsd: 600, durationDays: 366 }), 50);
+  assert.equal(monthlyRate({ amountUsd: 90, durationDays: 90 }), 30);
+  assert.equal(monthlyRate({ amountUsd: 120, durationDays: 180 }), 20);
+  assert.equal(monthlyRate({ amountUsd: 25, durationDays: 31 }), 25);
+  assert.equal(monthlyRate({ amountUsd: 25, durationDays: 30 }), 25);
+  assert.equal(monthlyRate({ amountUsd: 25, durationDays: null }), 25);
+  assert.equal(monthlyRate({ amountUsd: 25 }), 25);
+  assert.equal(Math.round(monthlyRate({ amountUsd: 10, durationDays: 7 }) * 100) / 100, 43.45, 'a weekly $10 is ~4.35 weeks a month');
+  assert.match(dash, /mrrRows = data\.payments\.filter\([^\n]*\.map\(\(p\) => \(\{ \.\.\.p, amountUsd: monthlyRate\(p\) \}\)\)/,
+    'the MRR card must sum monthly rates, not period prices');
+  // …and only over rows that BILL AGAIN. api/admin/payments.js marks them
+  // `renews`; a crypto pass is a fixed term nothing renews, so counting it
+  // gives a crypto-heavy store an MRR that expires on its own. The card and
+  // its sparkline are two separate filters and both were missing the test.
+  assert.match(dash, /mrrRows = data\.payments\.filter\(\(p\) => p\.entitled && !p\.lifetime && p\.renews\)/,
+    'the MRR card counts only rows that renew');
+  assert.match(dash, /mrr: sparkSvg\(bucketSeries\(data\.payments\.filter\(\(p\) => !p\.lifetime && p\.renews\)/,
+    'and so does the sparkline under it');
+
+  // Top Products and the Revenue card sit side by side and must agree that
+  // no change is not growth: 0% is flat in both, never a green ▲0%.
+  const deltaChip = lift('deltaChip', /function deltaChip\(delta\) \{[\s\S]*?\n\}/)();
+  const pct = (cur, prev) => (prev <= 0 ? null : ((cur - prev) / prev) * 100);
+  const prev = new Map([['VIP', 200], ['Up', 100], ['Down', 100], ['Nudge', 100]]);
+  const topDelta = lift('topDelta', /const topDelta = \(name, v\) => \{[\s\S]*?\n  \};|const topDelta = \(name, v\) => [^\n]*;/, 'byPlanPrev', 'pct', 'deltaChip')(prev, pct, deltaChip);
+  assert.equal(topDelta('VIP', 200), '<span class="delta flat">0%</span>');
+  assert.equal(deltaChip(0), '<span class="delta flat">0%</span>');
+  assert.match(topDelta('Up', 150), /class="delta up".*▲.*50%/);
+  assert.match(topDelta('Down', 50), /class="delta down".*▼.*50%/);
+  assert.equal(topDelta('New', 50), '', 'nothing to compare against says nothing');
+  // …and they must agree ROUNDING too, not just the flat rule. A second copy
+  // of the formatter kept whole percents here while the card beside it kept a
+  // decimal below 10%, so $1,000 -> $1,004 read ▲0.4% on the Revenue card and
+  // a flat 0% on the very same product: two chips, one number, opposite
+  // stories about whether it grew.
+  for (const v of [100.4, 99.6, 100.6, 104, 150, 250, 100]) {
+    assert.equal(topDelta('Nudge', v), deltaChip(pct(v, 100)), `Top Products and the Revenue card must print ${v} vs 100 identically`);
+  }
+  assert.match(topDelta('Nudge', 100.4), /class="delta up".*0\.4%/, 'a +0.4% product is growth, not flat');
+
+  // The black face: stamped before first paint from the key dashboard.js
+  // remembers the SAVED face under, and re-applied by route() for the views
+  // that have no store — so an unsaved Customize preview cannot follow the
+  // seller out to "All servers", and the picker wears the same ground
+  // whether it was loaded cold or reached by navigating back.
+  const html = fs.readFileSync(new URL('../public/dashboard.html', import.meta.url), 'utf8');
+  const key = dash.match(/const DARK_FACE_KEY = '([a-z-]+)'/)?.[1];
+  assert.ok(key, 'dashboard.js names the face key');
+  // The face is a per-STORE preference. Under one browser-wide key it was
+  // whichever store was opened last, so a seller running one black and one
+  // navy store got the wrong first paint on every cold load of the other —
+  // the flash the key exists to stop, moved rather than removed. The head
+  // script is lifted out and RUN, against a fake localStorage: a rewrite is
+  // fine, reading the wrong store's face is not.
+  const headSrc = html.match(/<script>(try \{[^<]*dues-dash-face[^<]*)<\/script>/)?.[1];
+  assert.ok(headSrc, 'dashboard.html still stamps the face before first paint');
+  const firstPaint = (saved, hash) => {
+    const root = { dataset: {} };
+    new Function('localStorage', 'location', 'document', headSrc)(
+      { getItem: (k) => (k in saved ? saved[k] : null) },
+      { hash },
+      { documentElement: root },
+    );
+    return root.dataset.dark ?? 'navy';
+  };
+  // Two stores, two faces, and the bare key left on whichever was opened last.
+  const twoStores = { [key]: 'black', [`${key}:ink`]: 'black', [`${key}:sky`]: 'navy' };
+  assert.equal(firstPaint(twoStores, '#/store/sky'), 'navy', 'the navy store paints navy even when the black one was opened last');
+  assert.equal(firstPaint(twoStores, '#/store/ink'), 'black', 'and the black store still paints black');
+  // A store never opened here, and the store-less views, fall back to the
+  // last saved face — the behaviour the single key always had.
+  assert.equal(firstPaint(twoStores, '#/store/brand-new'), 'black', 'an unseen store falls back to the last saved face');
+  assert.equal(firstPaint(twoStores, '#/'), 'black', 'so does the picker');
+  assert.equal(firstPaint({ [`${key}:sky`]: 'navy' }, '#/'), 'navy', 'and nothing saved is navy, never a crash');
+  // dashboard.js must WRITE the per-store key, or the head script reads a key
+  // that is never set and the fallback quietly becomes the only path.
+  assert.match(dash, /rememberDarkFace\(darkFace, store\.slug\)/, 'viewStore remembers the face under the store it belongs to');
+  assert.match(dash, /localStorage\.setItem\(darkFaceKey\(slug\), face\)/, 'rememberDarkFace writes the per-store key');
+  const routeSrc = dash.match(/async function route\(\) \{[\s\S]*?\n\}/)[0];
+  const at = (needle) => { const i = routeSrc.indexOf(needle); assert.ok(i >= 0, `route() must contain ${needle}`); return i; };
+  assert.ok(at('applyDarkFace(savedDarkFace())') < at('viewSetup(') && at('applyDarkFace(savedDarkFace())') < at('viewAdmin()') && at('applyDarkFace(savedDarkFace())') < at('viewPicker()'),
+    'the saved face is applied before every store-less view');
+  assert.ok(!/const pickedFace[\s\S]*?rememberDarkFace/.test(dash.match(/function wireCustomize[\s\S]*?\n\}/)?.[0] ?? ''),
+    'a preview is never remembered as the saved face');
+  // And the night rules that the black face inherits name tokens, not navy:
+  // the revenue tooltip and the preview's browser bar were the four that did.
+  for (const sel of ['.chart-tip', '.th-frame-bar', '.th-frame-url']) {
+    const rule = html.match(new RegExp(`html:not\\(\\[data-theme='light'\\]\\) ${sel.replace('.', '\\.')} \\{([^}]*)\\}`))?.[1] ?? '';
+    assert.ok(rule && !/#131b2d|#101827|19, 27, 45|16, 24, 39/.test(rule), `${sel} night rule must not hard-code navy: ${rule}`);
+  }
+  assert.match(html, /html\[data-dark='black'\]:not\(\[data-theme='light'\]\) \.th-frame-dot/, 'the preview dots get a black-face value');
+
+  // Saving the storefront or dashboard appearance re-renders to a screen that
+  // looks exactly like the one before the click; each says it landed.
+  assert.match(dash, /theme: read\(\) \}\);\n\s+state\.data = null;\n\s+await viewStore\(slug\);\n\s+flashSaved\('#th-note'\)/, 'Save appearance confirms into #th-note');
+  assert.match(dash, /dashboardPrefs: prefsBody \}\);\n\s+state\.data = null;\n\s+await viewStore\(slug\);\n\s+flashSaved\('#dc-ok'\)/, 'Customize save confirms into #dc-ok');
+  assert.match(dash, /id="dc-ok" role="status"/, 'and the slot exists in the Customize foot');
+  // The 320px billing card: the interval toggle wraps rather than slicing the
+  // "2 months free" note at the card edge.
+  const dcss = fs.readFileSync(new URL('../public/dash.css', import.meta.url), 'utf8');
+  assert.match(dcss, /#billing-body \.bill-toggle \{[^}]*flex-wrap: wrap/, 'the billing interval toggle wraps on narrow phones');
+});
+
+test('the pricing page prints TIERS — every price, yearly price and cap, by name', async () => {
+  // Every number on /pricing is hand-written HTML. The server charges what
+  // TIERS says (ensureTierPrice provisions a Stripe price from it), so the day
+  // TIERS moves and the page does not, Stripe bills one number while the page
+  // advertises another — the mirror image of the drift billing.js already
+  // documents once catching. Pinned card by card, by tier NAME, so a copy edit
+  // elsewhere on the card cannot pass for a price check.
+  const { TIERS } = await import('../src/services/billing.js');
+  const pricing = fs.readFileSync(new URL('../public/pricing.html', import.meta.url), 'utf8');
+  const cards = pricing.split(/<div class="plan(?: plan-pop)?">/).slice(1);
+  const usd = (n) => (n === 0 ? '$0' : '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+  for (const tier of TIERS) {
+    const card = cards.find((c) => new RegExp(`<div class="plan-name"><b>${tier.name}</b>`).test(c));
+    assert.ok(card, `the pricing page must have a ${tier.name} card`);
+    const fig = card.match(/<span class="serif" data-monthly="([^"]*)" data-yearly="([^"]*)">([^<]*)</);
+    assert.ok(fig, `${tier.name} must carry both prices as data attributes`);
+    assert.equal(fig[1], usd(tier.priceUsd), `${tier.name} monthly price must be TIERS.priceUsd`);
+    assert.equal(fig[2], usd(tier.yearlyUsd), `${tier.name} yearly price must be TIERS.yearlyUsd`);
+    assert.equal(fig[3], fig[1], `${tier.name} must open on the monthly price the toggle starts on`);
+    // "2 months free" is only true while yearly is exactly ten monthlies.
+    assert.equal(Math.round(tier.yearlyUsd * 100), Math.round(tier.priceUsd * 100) * 10,
+      `${tier.name} yearly must be ten months or the "2 months free" toggle lies`);
+    const cap = card.match(/<div class="plan-cap"><b(?: class="cap-word")?>([^<]*)<\/b>/)?.[1];
+    assert.equal(cap, tier.maxMembers === null ? 'No limit' : String(tier.maxMembers),
+      `${tier.name} member cap must be TIERS.maxMembers`);
+  }
+  assert.equal(cards.length, TIERS.length, 'one card per tier, no card for a tier that does not exist');
+
+  // The paid cards describe a background IMPORT. The only control the product
+  // has for it is a URL field (dashboard #th-bgurl) — there is no file picker
+  // for a store background — so a card must not promise "uploads". If a picker
+  // is ever wired to bgUrl, this assertion is the one to drop.
+  const dash = fs.readFileSync(new URL('../public/dashboard.js', import.meta.url), 'utf8');
+  assert.match(dash.match(/<input[^>]*id="th-bgurl"[^>]*>/)?.[0] ?? '', /type="url"/, 'the background import is a URL field');
+  for (const c of cards) {
+    if (/<b>Free<\/b>/.test(c)) continue;
+    const look = c.match(/class="plan-look">([^<]*)</)?.[1] ?? '';
+    assert.doesNotMatch(look, /upload/i, `a paid card must not advertise uploads the product does not take: "${look}"`);
+  }
+});
+
+test('the pricing FAQ is published as FAQPage structured data, word for word', async () => {
+  // The seven <details> are the most substantive Q&A on the site; the
+  // FAQPage block is what lets a search engine show them. It is a second
+  // copy of the same text, so the test reads BOTH from the file and requires
+  // them equal — an edit to one without the other fails here.
+  const pricing = fs.readFileSync(new URL('../public/pricing.html', import.meta.url), 'utf8');
+  const decode = (t) => t.replace(/&rsquo;/g, '’').replace(/&mdash;/g, '—').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
+  const list = pricing.match(/<div class="faq-list">([\s\S]*?)<\/div>\s*<div class="faq-cta">/)?.[1] ?? '';
+  const shown = [...list.matchAll(/<summary>([\s\S]*?)<\/summary>\s*<p>([\s\S]*?)<\/p>/g)]
+    .map((m) => ({ q: decode(m[1]), a: decode(m[2]) }));
+  assert.ok(shown.length >= 5, 'the pricing page keeps a real FAQ');
+  const blocks = [...pricing.matchAll(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g)].map((m) => JSON.parse(m[1]));
+  const faq = blocks.find((b) => b['@type'] === 'FAQPage');
+  assert.ok(faq, 'the pricing page must ship a FAQPage block');
+  assert.deepEqual(
+    faq.mainEntity.map((e) => ({ q: e.name, a: e.acceptedAnswer.text })),
+    shown,
+    'FAQPage must mirror the visible FAQ, question for question',
+  );
+  for (const e of faq.mainEntity) {
+    assert.equal(e['@type'], 'Question');
+    assert.equal(e.acceptedAnswer['@type'], 'Answer');
+    assert.doesNotMatch(e.name + e.acceptedAnswer.text, /[<&]/, 'structured data carries text, not markup or entities');
+  }
+
+  // The FAQ title shares one clamp with the fees title (.fees-title,.faq-title).
+  // A leftover homepage `.faq h2` rule out-ranked it and made the two sibling
+  // titles differ by 8-20px at every width; the page must not grow one back.
+  assert.doesNotMatch(pricing, /\.faq h2\{/, 'no homepage .faq h2 rule overriding .faq-title on the pricing page');
+  // The other half of that copy was a second `.faq` padding rule pasted in
+  // below the 860px one, which then out-ranked it. /pricing declares its FAQ
+  // padding exactly twice — the base rule and the narrow-width override, in
+  // that order — so this checks the count and the order rather than the
+  // property, which is padding-block on both since the gutter now comes from
+  // .wrap alone.
+  const faqPads = [...pricing.matchAll(/^\s*\.faq\{[^}]*padding[^}]*\}/gm)].map((m) => m.index);
+  assert.equal(faqPads.length, 2, '/pricing declares .faq padding twice: the base rule and the 860px one');
+  assert.ok(faqPads[1] > pricing.indexOf('@media (max-width:860px)'),
+    'the narrow-width .faq padding is the last one to win');
 });
 
 test('every page on the site is named in the footer — checked against the filesystem', async () => {
@@ -1110,10 +1536,14 @@ test('every page on the site is named in the footer — checked against the file
   // The app screens are not marketing pages and are linked from the product,
   // not the directory: a signed-out visitor has no use for /receipt.
   const APP = new Set(['/', '/dashboard', '/account', '/receipt', '/store']);
+  // An index file is its directory's bare URL — vs/index.html is /vs, which
+  // is what the canonical, the sitemap and vercel.json's rewrite all say.
+  // This map used to produce /vs/, and that is what held the homepage to the
+  // slash form while every other reference used the bare one.
   const pages = walk(PUBLIC)
     .map((f) => {
       const rel = `/${relative(PUBLIC, f)}`;
-      return rel.endsWith('/index.html') ? rel.slice(0, -'index.html'.length) : rel.slice(0, -'.html'.length);
+      return rel.endsWith('/index.html') ? rel.slice(0, -'/index.html'.length) || '/' : rel.slice(0, -'.html'.length);
     })
     .filter((p) => !APP.has(p));
 
@@ -1126,6 +1556,336 @@ test('every page on the site is named in the footer — checked against the file
   const onDisk = new Set(pages);
   const dead = [...linked].filter((l) => !onDisk.has(l) && !l.startsWith('/api') && !APP.has(l)).sort();
   assert.deepEqual(dead, [], `footer links with no page behind them: ${dead.join(', ')}`);
+});
+
+test('every in-page anchor link on the site points at an id that exists — checked against the filesystem', async () => {
+  // A /#how link whose section was renamed scrolls nowhere and nobody sees
+  // it fail. This walk was cited by an earlier commit as "a check that every
+  // /#anchor on the site resolves to a real id" while living only in a
+  // scratch script that never landed; now it lives here.
+  const { readdirSync, statSync, existsSync, readFileSync } = await import('node:fs');
+  const { join, relative, dirname, resolve } = await import('node:path');
+  const PUBLIC = new URL('../public/', import.meta.url).pathname;
+  const walk = (dir, out = []) => {
+    for (const name of readdirSync(dir)) {
+      const full = join(dir, name);
+      if (statSync(full).isDirectory()) walk(full, out);
+      else if (name.endsWith('.html')) out.push(full);
+    }
+    return out;
+  };
+  const idsIn = new Map();
+  const idsOf = (file) => {
+    if (!idsIn.has(file)) {
+      idsIn.set(file, existsSync(file)
+        ? new Set([...readFileSync(file, 'utf8').matchAll(/\sid="([^"]+)"/g)].map((m) => m[1]))
+        : null);
+    }
+    return idsIn.get(file);
+  };
+  let seen = 0;
+  const dead = [];
+  for (const file of walk(PUBLIC)) {
+    for (const [, target, id] of readFileSync(file, 'utf8').matchAll(/href="([^"#]*)#([^"]+)"/g)) {
+      if (/^https?:/.test(target)) continue;
+      seen++;
+      let page;
+      if (target === '') page = file;
+      else if (target.startsWith('/')) {
+        // cleanUrls: /pricing → pricing.html, /vs → vs/index.html, / → index.html.
+        const rel = target.slice(1);
+        page = rel === '' ? join(PUBLIC, 'index.html')
+          : [join(PUBLIC, `${rel}.html`), join(PUBLIC, rel, 'index.html'), join(PUBLIC, rel)].find((c) => existsSync(c)) ?? join(PUBLIC, `${rel}.html`);
+      } else page = resolve(dirname(file), target.endsWith('.html') ? target : `${target}.html`);
+      const ids = idsOf(page);
+      if (!ids) dead.push(`${relative(PUBLIC, file)} → ${target}#${id} (no such page)`);
+      else if (!ids.has(id)) dead.push(`${relative(PUBLIC, file)} → ${target}#${id} (no such id)`);
+    }
+  }
+  // Two survive: the /#how link in /pricing's body copy and the one in
+  // /discover's. /discover's nav used to carry a third and fourth (desktop
+  // and mobile "Features") until the site settled on one shared nav; the
+  // floor is only here so an empty walk cannot pass as a green check.
+  assert.ok(seen >= 2, `expected the site's anchor links to be walked, found ${seen}`);
+  assert.deepEqual(dead, [], `anchor links with nothing to scroll to: ${dead.join(', ')}`);
+});
+
+test('package.json scripts run files the repository ships (nothing behind a gitignore rule)', async () => {
+  // `npm run test:dash` once pointed at scripts/_verify-dash.mjs, which the
+  // `scripts/_*` rule keeps out of every commit: four commits cited it as
+  // their verification and a fresh clone could not run it. Every script
+  // entry must name a file that exists AND that git would not ignore.
+  const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+  const targets = Object.entries(pkg.scripts)
+    .map(([name, cmd]) => [name, cmd.match(/^node (scripts\/[^\s]+)/)?.[1]])
+    .filter(([, file]) => file);
+  assert.ok(targets.length >= 8, 'the script table should still be node scripts/…');
+  const missing = targets.filter(([, file]) => !fs.existsSync(path.join(ROOT, file))).map(([n, f]) => `${n} → ${f}`);
+  assert.deepEqual(missing, [], `scripts pointing at files that do not exist: ${missing.join(', ')}`);
+  const git = spawnSync('git', ['check-ignore', ...targets.map(([, f]) => f)], { cwd: ROOT, encoding: 'utf8' });
+  if (git.error) return; // no git on this box — existence is all that can be checked
+  assert.equal(git.stdout.trim(), '', `scripts pointing at gitignored files: ${git.stdout.trim().split('\n').join(', ')}`);
+});
+
+test('every environment variable the code reads is named in .env.example, with the defaults it documents', async () => {
+  // README makes .env.example the deploy checklist ("set the environment
+  // variables listed in .env.example"), so a variable the code reads but the
+  // file never names is one nobody sets: RESEND_API_KEY was one, and its
+  // absence silently switches receipts off. The walk is over src/ and api/,
+  // the code that ships; scripts/ are local tooling with their own flags.
+  const { readdirSync, statSync } = await import('node:fs');
+  const walk = (dir, out = []) => {
+    for (const name of readdirSync(dir)) {
+      const full = path.join(dir, name);
+      if (statSync(full).isDirectory()) walk(full, out);
+      else if (name.endsWith('.js')) out.push(full);
+    }
+    return out;
+  };
+  const read = new Set();
+  for (const file of [...walk(path.join(ROOT, 'src')), ...walk(path.join(ROOT, 'api'))]) {
+    const src = fs.readFileSync(file, 'utf8');
+    for (const m of src.matchAll(/process\.env\.([A-Z][A-Z0-9_]*)|\b(?:env|num)\('([A-Z][A-Z0-9_]*)'/g)) read.add(m[1] ?? m[2]);
+  }
+  // Not deploy settings: the two test/dev hooks that point the app at another
+  // .env or plan catalog, the flag Vercel injects itself, and the local
+  // arming switch for the bot-profile refresh that only runs in serverless.
+  const INTERNAL = new Set(['ENV_PATH', 'PLANS_PATH', 'VERCEL', 'BRAND_REFRESH']);
+  const example = fs.readFileSync(path.join(ROOT, '.env.example'), 'utf8');
+  const named = new Set([...example.matchAll(/^#?\s*([A-Z][A-Z0-9_]*)=/gm)].map((m) => m[1]));
+  const undocumented = [...read].filter((k) => !INTERNAL.has(k) && !named.has(k)).sort();
+  assert.deepEqual(undocumented, [], `read by src/ or api/ but absent from .env.example: ${undocumented.join(', ')}`);
+  assert.ok(read.size >= 30, `expected the full variable set to be walked, found ${read.size}`);
+
+  // The one default the file spells out must be the code's default: it said
+  // "Ripley" for a year after the platform became Dues, an invitation to
+  // paste the old brand back in.
+  const platformDefault = fs.readFileSync(path.join(ROOT, 'src', 'config.js'), 'utf8').match(/env\('PLATFORM_NAME', '([^']+)'\)/)[1];
+  assert.match(example, new RegExp(`^#\\s*PLATFORM_NAME=${platformDefault}$`, 'm'), `.env.example must document PLATFORM_NAME's real default (${platformDefault})`);
+});
+
+test('vercel.json: the old domain 301s to dues.gg with the path kept; the webhook aliases survive', async () => {
+  // The redirect only bites once ripleybot.com is attached to the project in
+  // Vercel — a human step — but the rule has to be right before that day.
+  const vercel = JSON.parse(fs.readFileSync(path.join(ROOT, 'vercel.json'), 'utf8'));
+  const rule = vercel.redirects.find((r) => (r.has ?? []).some((h) => h.type === 'host' && /ripleybot/.test(h.value)));
+  assert.ok(rule, 'a host-conditioned redirect for ripleybot.com must exist');
+  const host = new RegExp(`^${rule.has.find((h) => h.type === 'host').value}$`);
+  for (const h of ['ripleybot.com', 'www.ripleybot.com']) assert.ok(host.test(h), `${h} must match the host condition`);
+  assert.equal(host.test('dues.gg'), false, 'the new domain must never match itself into a loop');
+  assert.equal(rule.permanent, true, 'a domain move is permanent (301/308), not a 307 the browser re-asks about');
+  assert.equal(rule.source, '/:path*', 'every path on the old host, the root included');
+  assert.equal(rule.destination, 'https://dues.gg/:path*', 'the path rides along, so old deep links keep working');
+  // The rewrites the storefront and providers depend on are untouched.
+  const rewritten = new Map(vercel.rewrites.map((r) => [r.source, r.destination]));
+  for (const [source, destination] of [
+    ['/webhooks/stripe', '/api/webhooks/stripe'],
+    ['/webhooks/coinbase', '/api/webhooks/coinbase'],
+    ['/webhooks/nowpayments', '/api/webhooks/nowpayments'],
+    ['/webhooks/stripe/:storeid', '/api/webhooks/stripe?store=:storeid'],
+    ['/s/:slug', '/api/store-page?store=:slug'],
+  ]) assert.equal(rewritten.get(source), destination, `${source} rewrite must be kept`);
+  // Every function that makes a provider call the platform default cannot
+  // outlive declares its own limit. A crypto checkout POST is up to three
+  // serial NOWPayments round trips of 15s each (coin list, create payment,
+  // and the minimum lookup on a minimum error); killed halfway it leaves an
+  // order row holding a seat and a discount use with no payment id, and an
+  // invoice the provider minted that no buyer is ever shown.
+  for (const fn of [
+    'api/webhooks/stripe.js',
+    'api/webhooks/coinbase.js',
+    'api/webhooks/nowpayments.js',
+    'api/cron/reconcile.js',
+    'api/checkout/crypto.js',
+    'api/admin/store.js',
+  ]) assert.ok((vercel.functions?.[fn]?.maxDuration ?? 0) >= 60, `${fn} must declare a maxDuration above the provider timeouts it can stack`);
+});
+
+test('the community invite is one setting: the site hop and the receipt read the same value, either name works', async () => {
+  // COMMUNITY_INVITE fed the receipt email while DISCORD_COMMUNITY_INVITE fed
+  // /api/community — re-issuing the invite under one name left the other
+  // surface on the dead link. Both now come from config.communityInvite.
+  const hop = await fetch(`${appUrl}/api/community`, { redirect: 'manual' });
+  assert.equal(hop.status, 302);
+  assert.equal(hop.headers.get('location'), COMMUNITY_INVITE, 'the site hop redirects to the configured invite');
+  // The older name is still honoured, so a deployment that set it keeps its invite.
+  const probe = (env) => spawnSync(process.execPath, ['-e', "import('./src/config.js').then((m) => console.log(m.config.communityInvite))"], {
+    cwd: ROOT, encoding: 'utf8',
+    env: { ...process.env, ENV_PATH: '/nonexistent/.env', PLANS_PATH, COMMUNITY_INVITE: '', DISCORD_COMMUNITY_INVITE: '', ...env },
+  }).stdout.trim();
+  assert.equal(probe({ DISCORD_COMMUNITY_INVITE: 'https://discord.gg/old-name' }), 'https://discord.gg/old-name');
+  assert.equal(probe({ COMMUNITY_INVITE: 'https://discord.gg/new-name', DISCORD_COMMUNITY_INVITE: 'https://discord.gg/old-name' }), 'https://discord.gg/new-name', 'the documented name wins when both are set');
+});
+
+// Walks public/ once, for the three checks below that ask questions of the
+// shipped site rather than of a running handler.
+function publicFiles(filter = () => true) {
+  const PUBLIC = path.join(ROOT, 'public');
+  const walk = (dir, out = []) => {
+    for (const name of fs.readdirSync(dir)) {
+      const full = path.join(dir, name);
+      if (fs.statSync(full).isDirectory()) walk(full, out);
+      else if (filter(full)) out.push(full);
+    }
+    return out;
+  };
+  return walk(PUBLIC).map((f) => path.relative(PUBLIC, f)).sort();
+}
+
+// config.communityInvite with no .env and no override — the value the
+// committed pages must have been generated from.
+function defaultCommunityInvite() {
+  return spawnSync(process.execPath, ['-e', "import('./src/config.js').then((m) => console.log(m.config.communityInvite))"], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    env: { ...process.env, ENV_PATH: '/nonexistent/.env', PLANS_PATH, COMMUNITY_INVITE: '', DISCORD_COMMUNITY_INVITE: '' },
+  }).stdout.trim();
+}
+
+test('public/ is the marketing site, not a tool shed: no operator scripts are served from it', async () => {
+  // public/setup-community.mjs was a byte copy of scripts/setup-community.mjs,
+  // put there so an operator could `curl -O https://dues.gg/setup-community.mjs`
+  // (commit 72d9fd0, "one-line download"). It is not a credential, but it is an
+  // operator tool — it documents where the bot token is looked up and how the
+  // community server is laid out — and it had already drifted a commit behind
+  // the real one, so the published copy built a slightly different server.
+  // public/ is served verbatim by Vercel: only browser assets belong in it.
+  const BROWSER_ASSET = /\.(html|js|css|json|txt|xml|webmanifest|svg|png|jpe?g|gif|webp|avif|ico|mp4|webm|woff2?)$/i;
+  const strays = publicFiles().filter((rel) => !BROWSER_ASSET.test(rel));
+  assert.deepEqual(strays, [], `served at dues.gg/… and not a browser asset: ${strays.join(', ')}`);
+  // Extension-blind backstop: an executable script announces itself with a
+  // shebang, and no browser asset ever starts with one.
+  const shebanged = publicFiles().filter((rel) => fs.readFileSync(path.join(ROOT, 'public', rel)).subarray(0, 2).toString() === '#!');
+  assert.deepEqual(shebanged, [], `executable scripts under public/: ${shebanged.join(', ')}`);
+  // The URL itself is gone, and nothing on the site links it back into being.
+  // One retry: this is an idempotent GET, and under a loaded machine undici
+  // has answered a healthy server with "fetch failed" once. A flaky ship gate
+  // is worse than a slow one.
+  const notServed = async () => {
+    for (let i = 0; ; i += 1) {
+      try { return (await fetch(`${appUrl}/setup-community.mjs`)).status; }
+      catch (err) { if (i) throw err; await new Promise((r) => setTimeout(r, 250)); }
+    }
+  };
+  assert.equal(await notServed(), 404, '/setup-community.mjs must not be served');
+  const linking = publicFiles((f) => f.endsWith('.html')).filter((rel) => fs.readFileSync(path.join(ROOT, 'public', rel), 'utf8').includes('setup-community'));
+  assert.deepEqual(linking, [], `pages still pointing at the withdrawn operator script: ${linking.join(', ')}`);
+  // It still ships where it is actually run from — a clone, not the website.
+  assert.ok(fs.existsSync(path.join(ROOT, 'scripts', 'setup-community.mjs')), 'the operator script itself must stay in scripts/');
+});
+
+test('the generated pages take the community invite from config, so one regenerate moves every one of them', async () => {
+  // The invite used to be a literal in the generator's footer template, which
+  // meant COMMUNITY_INVITE moved exactly two surfaces (the hop and the receipt
+  // email) while 45 shipped pages kept linking whatever was last pasted in —
+  // and config.js's own comment claimed otherwise. The generator now reads
+  // config.communityInvite, so the fix is: set the value, regenerate, commit.
+  const gen = fs.readFileSync(path.join(ROOT, 'scripts', 'gen-seo-pages.mjs'), 'utf8');
+  assert.ok(gen.includes('config.communityInvite'), 'the generator must take the invite from config');
+  assert.deepEqual(gen.match(/discord\.gg\/[^"'`\s)]+/g), null, 'the generator must not carry a literal invite of its own');
+
+  const invite = defaultCommunityInvite();
+  assert.match(invite, /^https:\/\/discord\.gg\/[A-Za-z0-9-]+$/, `config.communityInvite should be a discord invite, got ${invite}`);
+  const generated = publicFiles((f) => f.endsWith('.html')).filter((rel) =>
+    rel === 'help.html' || /^(vs|tools|use-cases|guides|alternatives)\//.test(rel));
+  assert.ok(generated.length >= 40, `expected the generated page network, found ${generated.length}`);
+  const stale = generated.filter((rel) => !fs.readFileSync(path.join(ROOT, 'public', rel), 'utf8').includes(`href="${invite}"`));
+  assert.deepEqual(stale, [], `these shipped pages were generated from a different invite than config's — rerun \`node scripts/gen-seo-pages.mjs\` with the value you deploy and commit the result: ${stale.join(', ')}`);
+
+  // The hand-written pages do not print the invite at all: they link the hop,
+  // which reads config per request, so re-issuing moves them with no deploy.
+  for (const rel of ['receipt.html', 'store.html']) {
+    const html = fs.readFileSync(path.join(ROOT, 'public', rel), 'utf8');
+    assert.ok(!/discord\.gg\//.test(html), `${rel} must link the /api/community hop, not a pasted invite`);
+    assert.ok(html.includes('href="/api/community"'), `${rel} must link the /api/community hop`);
+  }
+});
+
+test('the fee calculators compute real figures from the ids the served markup actually carries', async () => {
+  // The rebrand left the calculators' element ids on the old name (t-ripley,
+  // t-row-ripley, t-bar-ripley) under a row labelled Dues; renaming them was
+  // shipped with no test at all. Half a rename — markup moved, script not, or
+  // the reverse — is silent in the generator and silent in the browser except
+  // that every bar reads $0. So: fetch the page, build a DOM containing ONLY
+  // the ids the markup declares, run the page's own inline script against it,
+  // and check the arithmetic. A missing id is a TypeError, not a quiet zero.
+  const money = (n) => `$${Math.round(n).toLocaleString('en-US')}`;
+  const planCost = (m) => (m <= 10 ? 0 : m <= 50 ? 14.99 : m <= 500 ? 44.99 : 134.99);
+  // The publicly-listed competitor pricing each page states in its own copy.
+  const CALCULATORS = {
+    'whop-fee-calculator': { whop: (rev) => rev * 0.03 },
+    'launchpass-fee-calculator': { launchpass: (rev) => 29 + rev * 0.035 },
+    'patreon-fee-calculator': { patreon: (rev) => rev * 0.08 },
+    'doorfee-fee-calculator': { doorfee: (rev) => rev * 0.1 },
+    'discord-fee-calculator': {
+      whop: (rev) => rev * 0.03,
+      launchpass: (rev) => 29 + rev * 0.035,
+      patreon: (rev) => rev * 0.08,
+      'upgrade-chat': () => 49,
+    },
+  };
+
+  for (const [slug, competitors] of Object.entries(CALCULATORS)) {
+    const res = await fetch(`${appUrl}/tools/${slug}`);
+    assert.equal(res.status, 200, `/tools/${slug} must be served`);
+    const html = await res.text();
+    assert.ok(!/ripley/i.test(html), `/tools/${slug} still ships the old brand in its markup`);
+
+    // The Dues bar must be the one wearing the dues ids — the exact thing the
+    // rename fixed, and the thing a future rename could split apart again.
+    const row = html.slice(html.indexOf('id="t-row-dues"'), html.indexOf('</div>', html.indexOf('id="t-bar-dues"')));
+    assert.ok(row.includes('>Dues<') && row.includes('id="t-dues"'), `/tools/${slug}: the Dues row does not carry the Dues ids`);
+
+    const ids = new Set([...html.matchAll(/\sid="([^"]+)"/g)].map((m) => m[1]));
+    const script = html.match(/<script>([\s\S]*?)<\/script>/)?.[1];
+    assert.ok(script && script.includes('getElementById'), `/tools/${slug} has no inline calculator script`);
+
+    // A DOM that knows only what the page declares. getElementById on anything
+    // else returns null, exactly as a browser would, and the script throws.
+    const nodes = new Map();
+    let onInput = null;
+    const value = { 't-subs': '100', 't-price': '50' };
+    const document = {
+      getElementById(id) {
+        if (!ids.has(id)) return null;
+        if (!nodes.has(id)) {
+          nodes.set(id, {
+            get value() { return value[id]; },
+            textContent: '',
+            style: {},
+            addEventListener: (_type, fn) => { onInput = fn; },
+          });
+        }
+        return nodes.get(id);
+      },
+    };
+    new Function('document', script)(document); // runs, and calls upd() itself
+    assert.ok(onInput, `/tools/${slug}: the calculator never wired up its sliders`);
+
+    const read = (id) => String(nodes.get(id).textContent);
+    for (const [members, price] of [[5, 5], [100, 50], [1000, 200]]) {
+      value['t-subs'] = String(members);
+      value['t-price'] = String(price);
+      onInput();
+      const rev = members * price;
+      const dues = planCost(members);
+      const costs = Object.entries(competitors).map(([id, f]) => [id, f(rev)]);
+      const worst = Math.max(...costs.map(([, c]) => c));
+      const where = `/tools/${slug} at ${members} members × $${price}`;
+      assert.equal(read('t-subs-out'), String(members), `${where}: member readout`);
+      assert.equal(read('t-price-out'), `$${price}`, `${where}: price readout`);
+      assert.equal(read('t-rev'), `${money(rev)}/mo`, `${where}: sales volume`);
+      assert.equal(read('t-dues'), `${money(dues)}/mo`, `${where}: the Dues plan cost`);
+      for (const [id, cost] of costs) assert.equal(read(`t-${id}`), `${money(cost)}/mo`, `${where}: ${id} cost`);
+      assert.equal(read('t-save'), `${money(Math.max(worst - dues, 0) * 12)}/yr`, `${where}: annual saving`);
+      // Every bar is drawn, which means every bar id resolved to an element.
+      for (const id of ['dues', ...costs.map(([k]) => k)]) {
+        const width = nodes.get(`t-bar-${id}`).style.width;
+        assert.match(String(width), /^\d+(\.\d+)?%$/, `${where}: the ${id} bar was never sized`);
+        assert.ok(parseFloat(width) >= 2, `${where}: the ${id} bar collapsed to nothing`);
+      }
+    }
+  }
 });
 
 test('cron endpoint rejects a missing or wrong secret (timingSafeEqual guard)', async () => {
@@ -1170,10 +1930,30 @@ test('OAuth login requests guilds.join, stores the token, and carries the plan b
   assert.equal(cb.headers.get('location'), '/dashboard?plan=insider', 'a store-less sign-in lands on the dashboard, never on any store');
   u1Cookie = cb.headers.getSetCookie().find((c) => c.startsWith('tl_session=')).split(';')[0];
 
-  assert.equal((await userRow(U1)).access_token, 'tok_code_u1');
+  // The OAuth token is sealed at rest like the Stripe keys (same secretbox):
+  // a database-only leak must not yield a guilds.join-scoped token. The
+  // guilds.join PUT further down proves it opens back to `tok_code_u1`.
+  const stored = await userRow(U1);
+  assert.match(stored.access_token, /^v1\./, 'access_token must be sealed at rest');
+  assert.match(stored.refresh_token, /^v1\./, 'refresh_token must be sealed at rest');
+  assert.ok(!stored.access_token.includes('tok_code_u1') && !stored.refresh_token.includes('ref_code_u1'), 'no cleartext token in the row');
 
   const me = await (await fetch(`${appUrl}/api/me`, { headers: { cookie: u1Cookie } })).json();
   assert.deepEqual({ loggedIn: me.loggedIn, username: me.username }, { loggedIn: true, username: 'trader_one' });
+
+  // Lazy migration: a row written before sealing holds cleartext and must
+  // keep working (the mock only honours `Bearer tok_<code>`, so a 200 here
+  // means the raw value reached Discord unchanged) until the next sign-in
+  // rewrites it sealed.
+  await tq('UPDATE users SET access_token = ? WHERE discord_id = ?', ['tok_code_u1', U1]);
+  assert.equal((await fetch(`${appUrl}/api/my/guilds`, { headers: { cookie: u1Cookie } })).status, 200, 'a legacy cleartext token still reads');
+  const again = await fetch(`${appUrl}/auth/login`, { redirect: 'manual' });
+  const againState = new URL(again.headers.get('location')).searchParams.get('state');
+  await fetch(`${appUrl}/auth/callback?code=code_u1&state=${againState}`, {
+    redirect: 'manual',
+    headers: { cookie: again.headers.getSetCookie().map((c) => c.split(';')[0]).join('; ') },
+  });
+  assert.match((await userRow(U1)).access_token, /^v1\./, 'the next sign-in re-seals the row');
 });
 
 test('OAuth state mismatch auto-heals once, then reports plainly (no loop)', async () => {
@@ -1191,6 +1971,122 @@ test('OAuth state mismatch auto-heals once, then reports plainly (no loop)', asy
   const second = await fetch(`${appUrl}/auth/callback?code=x&state=${retryState}`, { redirect: 'manual' });
   assert.equal(second.status, 400);
   assert.match(await second.text(), /did not keep the login cookie/i);
+});
+
+test('a failed Discord token exchange explains itself and spends the state cookie (no 500 loop)', async () => {
+  // A reused or expired code: Discord answers 400 invalid_grant, which the
+  // mock does for any code it has never issued. The buyer came from a plan.
+  const login = await fetch(`${appUrl}/auth/login?plan=insider`, { redirect: 'manual' });
+  const state = new URL(login.headers.get('location')).searchParams.get('state');
+  const cookies = login.headers.getSetCookie().map((c) => c.split(';')[0]);
+  const failed = await fetch(`${appUrl}/auth/callback?code=code_never_issued&state=${state}`, {
+    redirect: 'manual',
+    headers: { cookie: cookies.join('; ') },
+  });
+  assert.equal(failed.status, 502, 'an upstream sign-in failure is not an opaque 500');
+  assert.match(await failed.text(), /Discord did not complete the sign-in/i);
+  const set = failed.headers.getSetCookie();
+  assert.ok(set.some((c) => /^tl_oauth_state=;.*Max-Age=0/.test(c)), 'the spent state cookie must be cleared');
+  assert.ok(!set.some((c) => c.startsWith('tl_checkout_plan=')), 'the plan cookie stays so the retry lands on the plan');
+  assert.ok(!set.some((c) => c.startsWith('tl_session=')), 'no session is minted for a failed exchange');
+
+  // A refresh of the same URL — the browser now has no state cookie — takes
+  // the existing recovery branch and mints a fresh login instead of failing
+  // the same way again.
+  const refresh = await fetch(`${appUrl}/auth/callback?code=code_never_issued&state=${state}`, {
+    redirect: 'manual',
+    headers: { cookie: cookies.filter((c) => !c.startsWith('tl_oauth_state=')).join('; ') },
+  });
+  assert.equal(refresh.status, 302);
+  assert.equal(refresh.headers.get('location'), '/auth/login?retry=1');
+
+  // Two failures in a row: the retry leg's state ends in `.r`, so a refresh
+  // of ITS failure page reaches the terminal branch. That branch used to
+  // tell a buyer their browser had dropped the login cookie — but the
+  // browser kept every cookie it was given; the server spent the state
+  // itself when Discord failed. A short-lived marker says which happened.
+  const retry = await fetch(`${appUrl}/auth/login?retry=1&plan=insider`, { redirect: 'manual' });
+  const retryState = new URL(retry.headers.get('location')).searchParams.get('state');
+  const retryCookies = retry.headers.getSetCookie().map((c) => c.split(';')[0]);
+  const failedTwice = await fetch(`${appUrl}/auth/callback?code=code_never_issued&state=${retryState}`, {
+    redirect: 'manual',
+    headers: { cookie: retryCookies.join('; ') },
+  });
+  assert.equal(failedTwice.status, 502);
+  const marker = failedTwice.headers.getSetCookie().find((c) => c.startsWith('tl_oauth_fail='));
+  assert.ok(marker && !/Max-Age=0/.test(marker), 'a Discord failure leaves a short-lived marker behind');
+  const keptJar = retryCookies.filter((c) => !c.startsWith('tl_oauth_state=')).concat(marker.split(';')[0]);
+  const secondRefresh = await fetch(`${appUrl}/auth/callback?code=code_never_issued&state=${retryState}`, {
+    redirect: 'manual',
+    headers: { cookie: keptJar.join('; ') },
+  });
+  const secondText = await secondRefresh.text();
+  assert.equal(secondRefresh.status, 502, 'an upstream failure is still an upstream failure on the retry leg');
+  assert.match(secondText, /Discord did not complete the sign-in/i);
+  assert.doesNotMatch(secondText, /did not keep the login cookie/i, 'the browser kept every cookie — do not send this buyer browser-hunting');
+  assert.ok(
+    secondRefresh.headers.getSetCookie().some((c) => /^tl_oauth_fail=;.*Max-Age=0/.test(c)),
+    'the marker is spent once it has been read',
+  );
+});
+
+test('the Discord token exchange is bounded, like every other Discord call', async () => {
+  // The catch above only fires on a rejection. A token endpoint that accepts
+  // the connection and never answers does not reject: the callback would sit
+  // until the platform killed the function, and that gateway timeout carries
+  // no Set-Cookie — so the state cookie survived and every refresh hung the
+  // same way. The bound is what turns a hang into the 502 pinned above.
+  // (Asserted at the call, not by waiting the ten seconds out.)
+  const { exchangeOAuthCode } = await import('../src/lib/discord.js');
+  const realFetch = globalThis.fetch;
+  let init = null;
+  globalThis.fetch = async (url, options) => {
+    init = options;
+    return new Response(JSON.stringify({ access_token: 'tok', refresh_token: 'ref' }), {
+      headers: { 'content-type': 'application/json' },
+    });
+  };
+  try {
+    await exchangeOAuthCode('code_u1');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  assert.ok(init?.signal instanceof AbortSignal, 'the OAuth token exchange must carry a timeout signal');
+  assert.equal(init.signal.aborted, false, 'and it must still be live when the request goes out');
+});
+
+test('sign-out is a POST; a GET confirms instead of clearing the session', async () => {
+  // SameSite=Lax rides on cross-site top-level GETs, so a GET that cleared
+  // the cookie would let any third-party link sign a seller out mid-task.
+  const get = await fetch(`${appUrl}/auth/logout`, { redirect: 'manual', headers: { cookie: u1Cookie } });
+  assert.equal(get.status, 200);
+  assert.match(get.headers.get('content-type'), /text\/html/);
+  assert.deepEqual(get.headers.getSetCookie(), [], 'a GET must not touch the session');
+  assert.match(await get.text(), /<form method="post" action="\/auth\/logout"/, 'the confirm page posts the real sign-out');
+
+  // A cross-site POST cannot carry the Lax cookie: nothing to clear, nothing cleared.
+  const foreign = await fetch(`${appUrl}/auth/logout`, { method: 'POST', redirect: 'manual' });
+  assert.equal(foreign.status, 302);
+  assert.deepEqual(foreign.headers.getSetCookie(), [], 'no session cookie, no clears');
+
+  // The page's own button: a same-site POST carrying the session clears both
+  // the domain-scoped cookie and any older host-only one.
+  const post = await fetch(`${appUrl}/auth/logout`, { method: 'POST', redirect: 'manual', headers: { cookie: u1Cookie } });
+  assert.equal(post.status, 302);
+  assert.equal(post.headers.get('location'), '/');
+  const clears = post.headers.getSetCookie().filter((c) => /^tl_session=;.*Max-Age=0/.test(c));
+  assert.equal(clears.length, 2, 'domain-scoped and host-only clears');
+  assert.ok(clears.some((c) => /Domain=tradeleaks\.e2e/.test(c)) && clears.some((c) => !/Domain=/.test(c)));
+
+  assert.equal((await fetch(`${appUrl}/auth/logout`, { method: 'PUT', redirect: 'manual' })).status, 405);
+
+  // And every Sign out button in the product submits that POST — none of
+  // them navigates to the GET.
+  for (const f of ['app.js', 'account.js', 'dashboard.js', 'home.js']) {
+    const src = fs.readFileSync(path.join(ROOT, 'public', f), 'utf8');
+    assert.ok(!src.includes("location.href = '/auth/logout'"), `${f} must not sign out via GET`);
+    assert.match(src, /f\.method = 'post';\s*f\.action = '\/auth\/logout';/, `${f} must sign out via a POST form`);
+  }
 });
 
 test('checkout endpoint creates a Stripe session with the buyer wired in', async () => {
@@ -1860,7 +2756,7 @@ test('a plan with stale roleIds grants by role NAME, and the doctor goes green',
     // entirely — the doctor must go fully green, with no stale-id complaint.
     const pick = await fetch(`${app2.url}/api/admin/plan-role`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', cookie: u1Cookie },
+      headers: { 'content-type': 'application/json', cookie: await signInOn(app2.url, 'code_u1') },
       body: JSON.stringify({ planId: 'named', roleId: R_NEW }),
     });
     assert.equal(pick.status, 200, await pick.text());
@@ -1902,7 +2798,7 @@ test('a stale stripePriceId resolves by amount; checkout works and the doctor wa
   const before = stripe.checkoutSessions.length;
   const res = await fetch(`${app3.url}/api/checkout/stripe`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', cookie: u1Cookie }, // same SESSION_SECRET across apps
+    headers: { 'content-type': 'application/json', cookie: await signInOn(app3.url, 'code_u1') },
     body: JSON.stringify({ planId: 'ghost' }),
   });
   assert.equal(res.status, 200, await res.text());
@@ -2180,6 +3076,11 @@ test('platform: payments dashboard endpoint is owner-gated and its totals add up
     { username: u6row.username, planId: u6row.planId, amountUsd: u6row.amountUsd, lifetime: u6row.lifetime },
     { username: 'trader_six', planId: 'lifetime', amountUsd: 299, lifetime: true },
   );
+  // Every row says what term it renews on, off its plan: the dashboard's MRR
+  // divides a yearly price by twelve with it, and cannot without it.
+  assert.equal(u6row.durationDays, null, 'a lifetime row has no term');
+  const monthlyRow = data.payments.find((p) => !p.lifetime && p.planId === 'insider');
+  assert.equal(monthlyRow?.durationDays, 31, 'a monthly row carries its plan\'s 31-day term');
   assert.ok(data.totals.activeMembers >= 2);
   assert.ok(data.totals.lifetimeMembers >= 1);
 
@@ -2367,6 +3268,9 @@ test('multi-tenant: a second owner onboards their server end-to-end and sells th
   assert.match(receipt.subject, /VIP Signals/);
   assert.match(receipt.html, /VIP Access/);
   assert.match(receipt.html, /\$49\.99/);
+  // The footer's community link is the configured invite, the same value the
+  // site's /api/community hop redirects to — one env var, both surfaces.
+  assert.ok(receipt.html.includes(COMMUNITY_INVITE), 'the receipt links the configured community invite');
 
   // The tenant owner's dashboard sees exactly their store — nothing else.
   const pay7 = await (await fetch(`${appUrl}/api/admin/payments`, { headers: { cookie: u7Cookie } })).json();
@@ -2770,6 +3674,29 @@ test('SEO reach pages serve: /vs, /tools, /use-cases, sitemap and robots', async
   assert.match(llms.body, /0% of sales/);
   assert.match(sm.body, /\/guides\/how-to-monetize-a-discord-server<\/loc>/);
   assert.match(sm.body, /\/alternatives\/subscord-alternatives<\/loc>/);
+  // The platform's own demo store is indexable, linked from the homepage and
+  // /help, and has a hand-written head — it is not tenant content, so it is
+  // the one store URL the sitemap lists.
+  assert.match(sm.body, /https:\/\/dues\.gg\/demo<\/loc>/, 'the hosted demo is in the sitemap');
+  // Every title in the sitemap fits Google's ~60-character display width and
+  // is unique. Seven ran to 77 characters and the clipped tail was the part
+  // that told the pages apart — the fee calculator lost "vs Dues", the
+  // comparison index lost "monetization" — and the platforms listicle fell
+  // out of its "Best X Alternatives" template as "Best Discord monetization
+  // platform Alternatives for Discord". Titles are generated, so the check
+  // reads the served pages rather than the generator.
+  const decode = (t) => t.replace(/&amp;/g, '&').replace(/&#39;/g, "'").replace(/&quot;/g, '"');
+  const seenTitles = new Map();
+  for (const loc of [...sm.body.matchAll(/<loc>https:\/\/dues\.gg([^<]*)<\/loc>/g)].map((m) => m[1] || '/')) {
+    const { status, body } = await get(loc);
+    assert.equal(status, 200, `${loc} is in the sitemap and must serve`);
+    const title = decode((body.match(/<title>([^<]*)<\/title>/) || [])[1] || '');
+    assert.ok(title, `${loc} has a <title>`);
+    assert.ok(title.length <= 60, `${loc} title is ${title.length} chars, over the ~60 Google shows: "${title}"`);
+    assert.ok(!seenTitles.has(title), `${loc} shares its title with ${seenTitles.get(title)}`);
+    seenTitles.set(title, loc);
+  }
+  assert.equal(seenTitles.get('Best Discord Monetization Platforms (2026)'), '/alternatives/best-discord-monetization-platforms', 'the platforms listicle carries its hand-written title');
   // Reach paths resolve to pages, never to a store.
   assert.equal((await fetch(`${appUrl}/api/plans?store=vs`)).status, 404);
   assert.equal((await fetch(`${appUrl}/api/plans?store=guides`)).status, 404);
@@ -2789,6 +3716,32 @@ test('SEO reach pages serve: /vs, /tools, /use-cases, sitemap and robots', async
     assert.ok(home.body.includes(`href="${href}"`), `the homepage links ${href}`);
   }
   assert.match(home.body, /href="\/vs\/subscord"/, 'the homepage links the Subscord comparison');
+  // One URL per index page. The sitemap, the canonicals and the breadcrumbs
+  // all say /vs; the footer used to say /vs/ from 46 pages, so every index
+  // was linked under two URLs, and /use-cases under neither.
+  for (const [p, body] of [['/', home.body], ['/pricing', (await get('/pricing')).body], ['/vs/subscord', sub.body], ['/help', (await get('/help')).body]]) {
+    const slashed = [...body.matchAll(/href="(\/(?:vs|tools|guides|use-cases|alternatives)\/)"/g)].map((m) => m[1]);
+    assert.deepEqual(slashed, [], `${p} links an index page with a trailing slash`);
+  }
+  for (const idx of ['/vs', '/tools', '/guides', '/use-cases', '/alternatives']) {
+    assert.ok(sub.body.includes(`href="${idx}"`), `the generated footer links ${idx}`);
+    assert.ok(home.body.includes(`href="${idx}"`), `the homepage links ${idx}`);
+  }
+
+  // /terms and /privacy carry the site header and the grid footer like every
+  // other page. They used to have a logo-only header — a visitor landing from
+  // a search result had no link into the site — and a flex footer, where the
+  // preferred-sources pill theme.js appends (grid-column:1/-1) had no row of
+  // its own and landed hard-right beside the legal links.
+  for (const legal of ['/terms', '/privacy']) {
+    const { status, body } = await get(legal);
+    assert.equal(status, 200);
+    const navLinks = [...body.matchAll(/<a class="nav-link" href="([^"]+)"/g)].map((m) => m[1]);
+    assert.deepEqual(navLinks, ['/discover', '/pricing', '/vs', '/tools'], `${legal} carries the site nav`);
+    assert.match(body, /<footer class="site-footer cols seo-footer">/, `${legal} uses the grid footer`);
+    assert.match(body, /<p class="footer-disclaimer">/, `${legal} footer has the row the preferred-sources pill is inserted before`);
+    assert.match(body, /<a href="\/terms">Terms<\/a><a href="\/privacy">Privacy<\/a>/, `${legal} footer links both legal pages`);
+  }
 
 
   // The homepage's "Invite Dues" button: a stable hop to Discord's
@@ -3008,26 +3961,29 @@ test('store themes: validated tokens in, server-rendered CSS out', async () => {
       body: JSON.stringify({ store: 'vip-signals', theme }),
     });
 
-  // THE COLOUR WAY IS FREE, THE WALLPAPER IS NOT. A free store may save every
-  // colour, corner, typeface and material, and the ten plain gradient grounds;
-  // it may not save a photograph, an animated ground, or an imported URL.
+  // THE WHOLE CATALOGUE IS FREE; AN IMPORTED URL IS NOT. A free store may save
+  // every colour, corner, typeface and material, and every background in the
+  // picker — the photographs and the animated grounds included. The one thing
+  // it may not do is point the look at an image on its own host.
   const U7ID = '507700000000000007';
   await tq('DELETE FROM platform_billing WHERE owner_discord_id = ?', [U7ID]);
   assert.equal((await setTheme({ bg: '#071209', accent: '#22c55e', radius: 20 })).status, 200,
     'a free store may set its own colours');
   assert.equal((await setTheme({ bg: '#071209', bgPreset: 'denim' })).status, 200,
     'a free store may use a plain gradient ground');
-  const freeTry = await setTheme({ bg: '#071209', bgPreset: 'starfield' });
-  assert.equal(freeTry.status, 402, 'a free store cannot save an animated wallpaper');
+  assert.equal((await setTheme({ bg: '#071209', bgPreset: 'starfield' })).status, 200,
+    'and an animated one');
+  assert.equal((await setTheme({ bg: '#071209', bgPreset: 'clouds-day' })).status, 200,
+    'and a photographic one — the catalogue is served from this origin, so it costs nothing per store');
+  const freeTry = await setTheme({ bgUrl: 'https://example.com/bg.gif' });
+  assert.equal(freeTry.status, 402, 'a free store cannot import an image from its own host');
   assert.equal((await freeTry.json()).upgrade, true, 'and the refusal points at the plan');
-  assert.equal((await setTheme({ bgUrl: 'https://example.com/bg.gif' })).status, 402,
-    'nor import one of its own');
-  // What a free store DID save must survive on the storefront — the gate takes
-  // the wallpaper off a look, it does not throw the whole look away.
-  assert.equal((await setTheme({ bg: '#071209', accent: '#22c55e' })).status, 200);
+  // What a free store saved must survive on the storefront — the gate takes the
+  // import off a look, it does not throw the whole look away.
+  assert.equal((await setTheme({ bg: '#071209', accent: '#22c55e', bgPreset: 'starfield' })).status, 200);
   const freePub = await (await fetch(`${appUrl}/api/plans?store=vip-signals`)).json();
   assert.equal(freePub.store.theme?.bg, '#071209', 'a free store keeps the colours it chose');
-  assert.equal(freePub.store.theme?.bgPreset, undefined, 'and carries no wallpaper');
+  assert.equal(freePub.store.theme?.bgPreset, 'starfield', 'and the wallpaper it chose');
   // Clearing is NOT gated — undoing must never need a subscription.
   assert.equal((await setTheme(null)).status, 200, 'anyone may reset to the default look');
 
@@ -3064,26 +4020,30 @@ test('store themes: validated tokens in, server-rendered CSS out', async () => {
   assert.equal((await setTheme({ bgUrl: 'javascript:alert(1)' })).status, 400, 'non-https bgUrl refused');
   assert.equal((await setTheme({ bgUrl: 'https://cdn.example.com/loop' })).status, 400, 'extension-less bgUrl refused');
   assert.equal((await setTheme({ material: 'velvet' })).status, 400, 'unknown material refused');
-  assert.equal((await setTheme({ bgPreset: 'aurora', material: 'liquid' })).status, 200);
+  assert.equal((await setTheme({ bgPreset: 'aurora', material: 'liquid', bgUrl: 'https://cdn.example.com/loop.mp4' })).status, 200);
   const bgPage = await (await fetch(`${appUrl}/vip-signals`)).text();
-  assert.match(bgPage, /<div class="store-bg" data-bg="aurora"/, 'the background layer is rendered');
-  assert.match(bgPage, /<body class="has-bg" data-bg="aurora" data-material="liquid">/, 'body carries bg + material');
+  // An import outranks a preset while it is allowed: bgLayer paints the url and
+  // labels the layer 'custom'. The preset underneath is what it falls back to.
+  assert.match(bgPage, /<div class="store-bg" data-bg="custom"/, 'the imported background is rendered');
+  assert.match(bgPage, /<body class="has-bg" data-bg="custom" data-material="liquid">/, 'body carries bg + material');
 
-  // THE PLAN LAPSES. The tokens stay on the row — a cancelled plan parks a
-  // store's look, it never deletes it — but the storefront goes back to the
-  // platform's own black on BOTH render paths. A write-time gate alone would
-  // let an owner theme a store, cancel, and keep the look for nothing.
+  // THE PLAN LAPSES. The tokens stay on the row — a cancelled plan parks the
+  // one rented part of a look, it never deletes it — and everything the
+  // platform serves itself stays exactly where it was. Only the imported URL
+  // goes, on BOTH render paths: a write-time gate alone would let an owner
+  // point a store at their own host, cancel, and keep it for nothing.
   await tq('DELETE FROM platform_billing WHERE owner_discord_id = ?', [U7ID]);
   const lapsedTheme = (await (await fetch(`${appUrl}/api/plans?store=vip-signals`)).json()).store.theme;
-  assert.equal(lapsedTheme.bgPreset, undefined, 'a lapsed store loses the wallpaper it was renting');
-  assert.equal(lapsedTheme.bgUrl, undefined, 'and any import with it');
-  assert.equal(lapsedTheme.material, 'liquid', 'but keeps the look it set, which was never rented');
+  assert.equal(lapsedTheme.bgUrl, undefined, 'a lapsed store loses the image it was importing');
+  assert.equal(lapsedTheme.bgPreset, 'aurora', 'but keeps the background it picked — the catalogue is free');
+  assert.equal(lapsedTheme.material, 'liquid', 'and the rest of the look it set');
   const lapsed = await (await fetch(`${appUrl}/vip-signals`)).text();
   assert.match(lapsed, /id="store-theme"/, 'the colour way is still server-rendered');
-  assert.ok(!/class="store-bg"/.test(lapsed), 'the wallpaper layer is not');
-  // The row still holds them, so re-subscribing restores the exact look.
+  assert.match(lapsed, /<div class="store-bg" data-bg="aurora"/,
+    'and the picked background takes over from the import that was parked');
+  // The row still holds the import, so re-subscribing restores the exact look.
   const stillStored = (await tq("SELECT theme FROM stores WHERE slug = 'vip-signals'")).rows[0].theme;
-  assert.match(String(stillStored), /aurora/, 'the tokens are parked, not deleted');
+  assert.match(String(stillStored), /loop\.mp4/, 'the imported url is parked, not deleted');
   // Re-subscribe: the exact same look is back, with nothing re-entered.
   await tq(
     'INSERT INTO platform_billing (owner_discord_id, tier, provider_ref, status, current_period_end, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
@@ -3152,7 +4112,15 @@ test('discover: opt-in directory of live stores, real numbers only', async () =>
   // The page itself serves, and the platform paths cannot be claimed as slugs.
   const page = await fetch(`${appUrl}/discover`);
   assert.equal(page.status, 200);
-  assert.match(await page.text(), /Find your next community/);
+  const discoverHtml = await page.text();
+  assert.match(discoverHtml, /Find your next community/);
+  // It is the first link in every footer and the one page in the sitemap that
+  // shipped with no image card: Discord and Slack unfurled it as bare text and
+  // X, with no twitter:card at all, as a plain link. The same block every
+  // other page carries.
+  assert.match(discoverHtml, /property="og:url" content="https:\/\/dues\.gg\/discover"/, '/discover names its own og:url');
+  assert.match(discoverHtml, /property="og:image" content="https:\/\/dues\.gg\/og-card\.jpg/, '/discover unfurls with the site card');
+  assert.match(discoverHtml, /name="twitter:card" content="summary_large_image"/, '/discover gets the large X card like every other page');
   assert.equal((await fetch(`${appUrl}/api/plans?store=discover`)).status, 404);
 
   // Opting out delists immediately.
@@ -3173,7 +4141,7 @@ test('products managed in-site: edit/toggle/limit/success-url/lazy price/discoun
     });
     return cb.headers.getSetCookie().find((c) => c.startsWith('tl_session=')).split(';')[0];
   };
-  const u7Cookie = await loginAs('code_u7');
+  let u7Cookie = await loginAs('code_u7'); // re-issued below when the Stripe key is rotated
   const u9Cookie = await loginAs('code_u9b'); // existing member (manual grant)
   const u10Cookie = await loginAs('code_u10'); // signed in, never purchased
   const call = (cookie, path, body) =>
@@ -3364,6 +4332,20 @@ test('products managed in-site: edit/toggle/limit/success-url/lazy price/discoun
   assert.equal(again.status, 200, await again.text());
   assert.equal(stripe.coupons.length, couponCount, 'the same code on the same terms mints no second coupon');
   assert.equal(stripe.checkoutSessions.at(-1)['discounts[0][coupon]'], sess['discounts[0][coupon]']);
+  // A fixed code that drags the total under Stripe's per-currency floor is
+  // refused by CHECKOUT itself, not only by the preview: the Pay button sends
+  // whatever is typed in the box, so a buyer who never clicked Apply must hit
+  // the same 409 here — before any coupon is minted on the seller's account.
+  const nearly = Math.round((vipNow.priceUsd - 0.25) * 100) / 100;
+  assert.equal((await disc({ action: 'create', code: 'NEARLY', kind: 'fixed', amount: nearly, planKey: vip.planKey })).status, 200);
+  const nearlyPrev = await fetch(`${appUrl}/api/discount?store=vip-signals&code=NEARLY&plan=${vip.planKey}`);
+  assert.equal(nearlyPrev.status, 409, 'preview refuses a total under the card floor');
+  const couponsBeforeFloor = stripe.coupons.length;
+  const underFloor = await checkout(u9Cookie, { planId: vip.planKey, discountCode: 'NEARLY' });
+  assert.equal(underFloor.status, 409, 'checkout refuses the same total, not just the preview');
+  assert.match((await underFloor.json()).error, /under the USD minimum of \$0\.50/);
+  assert.equal(stripe.coupons.length, couponsBeforeFloor, 'no coupon is minted for a total no card can clear');
+  assert.equal((await disc({ action: 'delete', code: 'NEARLY' })).status, 200);
   // Completed payment counts the use.
   await deliverStripe({
     id: 'evt_disc_1',
@@ -3423,7 +4405,16 @@ test('products managed in-site: edit/toggle/limit/success-url/lazy price/discoun
   const storeCall = (body) => call(u7Cookie, '/api/admin/store', { store: 'vip-signals', ...body });
   assert.equal((await storeCall({ stripeKey: 'sk_test_wrong' })).status, 400, 'key rotation validates with Stripe first');
   assert.equal((await storeCall({ stripeKey: 'pk_live_publishable' })).status, 400, 'a publishable key is refused on shape alone');
-  assert.equal((await storeCall({ stripeKey: OWNER2_KEY })).status, 200);
+  const rotated = await storeCall({ stripeKey: OWNER2_KEY });
+  assert.equal(rotated.status, 200);
+  // Re-entering the key is what a seller does when they suspect a compromise:
+  // every session of the account dies with it, and the browser doing the
+  // rotating is re-issued in the same reply so it is not thrown out.
+  const preRotation = u7Cookie;
+  u7Cookie = rotated.headers.getSetCookie().find((c) => c.startsWith('tl_session=')).split(';')[0];
+  assert.notEqual(u7Cookie, preRotation, 'the rotating browser gets a fresh cookie');
+  assert.equal((await (await fetch(`${appUrl}/api/me`, { headers: { cookie: preRotation } })).json()).loggedIn, false, 'the pre-rotation cookie is dead everywhere');
+  assert.equal((await fetch(`${appUrl}/api/admin/payments?store=vip-signals`, { headers: { cookie: preRotation } })).status, 401, 'a revoked cookie fails closed on admin reads');
   assert.equal((await storeCall({ name: 'VIP Signals Pro', description: 'The alpha desk.', bannerUrl: 'https://cdn.e2e.test/banner.png' })).status, 200);
   // Store-page extras: about, social links and the member-count badge.
   assert.equal((await storeCall({ links: { x: 'http://insecure.example' } })).status, 400, 'links must be https');
@@ -3799,6 +4790,110 @@ test('gated + limited-time products: only role holders buy, expiry ends the sale
   assert.equal((await onboard({ step: 'product-delete', storeId, planKey: plan.planKey })).status, 200);
 });
 
+test('storefront chrome: hidden wins, touch targets reach 44, phone text floors at 12px', async () => {
+  // A stylesheet is behaviour too. Each of these pinned a buyer-visible bug
+  // that a desktop skim signed off on, and the suite cannot run a browser —
+  // so it holds the RULES that fixed them, from the served stylesheet, with
+  // the same selectors the pages use.
+  const css = await (await fetch(`${appUrl}/styles.css`)).text();
+  const plain = css.replace(/\/\*[\s\S]*?\*\//g, ''); // comments talk about selectors too
+  const rules = (sel) => {
+    // every declaration block whose selector list carries `sel` verbatim
+    const out = [];
+    const re = /([^{}]+)\{([^{}]*)\}/g;
+    let m;
+    while ((m = re.exec(plain))) if (m[1].split(',').map((s) => s.trim()).includes(sel)) out.push(m[2]);
+    return out;
+  };
+  const page = (file) => fs.readFileSync(path.join(ROOT, 'public', file), 'utf8');
+
+  // [hidden] is a UA rule with no specificity; .shop-btn's display:inline-flex
+  // beat it and /demo shipped an inert Follow button with .hidden === true.
+  // One !important rule, and nothing in the sheet may push back against it.
+  assert.match(css, /\n\[hidden\] \{ display: none !important; \}/, 'the generic [hidden] rule must be in the served stylesheet');
+  for (const [, sel, body] of plain.matchAll(/([^{}]*\[hidden\][^{}]*)\{([^{}]*)\}/g)) {
+    if (/:not\([^)]*\[hidden\]/.test(sel)) continue; // `.x:not([hidden])` is the attribute doing its job
+    const d = body.match(/display:\s*([^;!]+)/);
+    if (d) assert.equal(d[1].trim(), 'none', `${sel.trim()} must not re-show a hidden element`);
+  }
+  const demo = await (await fetch(`${appUrl}/api/plans?store=demo`)).json();
+  assert.equal(demo.store.followable, false, 'the demo store is not followable, so its Follow button is hidden — and must actually vanish');
+
+  // Touch targets: the phone pass had stopped at 40px, and several controls
+  // were never sized for a finger at all. Hit boxes, not drawn boxes.
+  const phone = css.slice(css.indexOf('@media (max-width: 560px) {\n  .shop-avatar'));
+  assert.match(phone, /\.shop-icon-btn \{ width: 44px; height: 44px;/, 'share button is 44px on phones');
+  assert.match(phone, /\.shop-btn \{ flex: 1; height: 44px; \}/, 'Join / Follow are 44px on phones');
+  assert.match(rules('.menu-btn')[0], /min-width: 44px; min-height: 44px/, 'the /discover hamburger is 44px');
+  assert.match(rules('.shop-mlink')[0], /padding: 4px; margin: -4px;/, 'store links carry a 24px pointer hit box');
+  const touch = css.slice(css.indexOf('@media (pointer: coarse) {'));
+  assert.ok(touch.length > 30, 'the touch pass exists');
+  assert.match(touch, /\.shop-mlink \{ width: 44px; height: 44px; align-items: center; justify-content: center; margin: -13\.5px; \}/, 'store links reach 44px under a finger');
+  assert.match(touch, /\.shop-mgroup \{ gap: 27px; \}/, 'store links sit a 44px pitch apart, so the hit boxes do not overlap');
+  assert.match(touch, /\.disc-chip \{ padding-top: 14px; padding-bottom: 14px; \}/, 'discover chips grow to 44px');
+  assert.match(touch, /\.powered-community::after \{ content: ""; position: absolute; inset: -12px 0; \}/, 'the community link reaches 44px');
+  assert.match(touch, /\.footer-col a \{ display: inline-flex; align-items: center; min-height: 38px; \}/, 'footer rows grow to a 44px pitch');
+  for (const file of ['index.html', 'pricing.html']) {
+    const html = page(file);
+    assert.match(html, /\.nav-login\{[^}]*padding:10px 0;margin:-10px 0\}/, `${file}: Log in has a 44px hit box`);
+    assert.match(html, /\.hero-foot a\{[^}]*min-height:44px;margin:-6px 0\}/, `${file}: the hero footer links have a 44px hit box in a 32px row`);
+    assert.match(html, /\.footer \.soc-tile::after\{content:"";position:absolute;inset:-6px\}/, `${file}: social tiles reach 44px`);
+    // The landing footer has a fit budget (the phone reveal disarms when it
+    // outgrows the viewport), so these rows cannot grow: the hit box reaches
+    // UP into the gap above the row, which is the whole pitch on a phone.
+    assert.match(html, /\.footer \.fcol a::after\{content:"";position:absolute;inset:-5px 0 0\}/, `${file}: footer links grow only upward, never the footer`);
+  }
+
+  // Phone text floor: nothing a buyer reads sits under 12px.
+  const px = (body) => [...body.matchAll(/font(?:-size)?:\s*(?:\d+\s+)?([\d.]+)px/g)].map((m) => Number(m[1]));
+  for (const sel of ['.shop-rolechip', '.alt-ours', '.footer-head', '.calc-note', '.calc-bar-sub', '.footer-disclaimer']) {
+    const sizes = rules(sel).flatMap(px);
+    assert.ok(sizes.length, `${sel} declares a size`);
+    assert.ok(sizes.every((n) => n >= 12), `${sel} must not go under 12px (got ${sizes})`);
+  }
+  for (const file of ['index.html', 'pricing.html']) {
+    const html = page(file);
+    for (const re of [/\.tog-save\{\s*font-size:([\d.]+)px/, /\.marq-cap\{\s*text-align:center;font-size:([\d.]+)px/, /\.kicker\{\s*display:block;font:600 ([\d.]+)px/, /\.footer \.fcol b\{[^}]*font-size:([\d.]+)px/]) {
+      const m = html.match(re);
+      assert.ok(m, `${file}: ${re} must still match`);
+      assert.ok(Number(m[1]) >= 12, `${file}: ${re} is ${m[1]}px, under the 12px floor`);
+    }
+    // the footer heading grew from 10.5px inside a fit-budgeted footer: the
+    // leading is what keeps its line box (and the phone budget) unchanged
+    assert.match(html, /\.footer \.fcol b\{[^}]*line-height:1\.1;/, `${file}: footer headings keep their 13px line box`);
+  }
+  const home = page('index.html');
+  assert.match(home, /\.pay-cap\{font:600 12px/, 'the payment caption is 12px');
+  assert.match(home, /\.save-cap\{display:block;font:600 12px/, 'the savings caption is 12px');
+  assert.doesNotMatch(home, /\.save-cap\{font-size:10\.5px\}/, 'no phone override drags it back under');
+
+  // The legal footnote ran ~185 characters a line on a desktop: capped like
+  // every other body block.
+  assert.match(rules('.footer-disclaimer')[0], /max-width: 78ch/, 'the footer disclaimer is capped to a readable measure');
+
+  // Store chrome over a wallpaper: header and footer wear the column's
+  // translucent ground and the ink, so their text no longer depends on the
+  // seller's photo.
+  assert.match(css, /body\.has-bg \.top, body\.has-bg > footer \{\n  background: color-mix\(in srgb, var\(--bg\) 46%, transparent\);/, 'header + footer get the column ground over a wallpaper');
+  assert.doesNotMatch(css, /body\.has-bg \.top \{ background: transparent/, 'the header must not be transparent over a wallpaper');
+  assert.match(css, /\nbody\.has-bg > footer, body\.has-bg \.powered-community,\nbody\.has-bg \.top \.nav-link, body\.has-bg \.top \.account, body\.has-bg \.top \.btn-ghost \{ color: var\(--ink\); \}/, 'chrome text over a wallpaper is the ink, not --dim');
+
+  // Day-sky SEO pages: blurple TEXT is the darker token. #5865f2 measured
+  // 4.3:1 on the paper and ~3.1:1 under the sky; #424cbd is 6.6:1 on the
+  // paper and 5.0:1 on the bluest band a prose link sits on. Pinned in the
+  // generator AND in the committed artifacts, so a regenerate that was never
+  // run cannot ship the old colour.
+  const gen = fs.readFileSync(path.join(ROOT, 'scripts', 'gen-seo-pages.mjs'), 'utf8');
+  const textLinks = ['--blurple-text: #424cbd;', '.guide-body a { color: var(--blurple-text); }', '.alt-card .seo-card-cta a { color: var(--blurple-text); }',
+    '.seo-card-cta, .cmp-table th:nth-child(2), .calc-label output { color: var(--blurple-text); }'];
+  for (const line of textLinks) assert.ok(gen.includes(line), `generator paints "${line}"`);
+  assert.doesNotMatch(gen, /\.guide-body a \{ color: #5865f2/, 'prose links never go back to the button blurple');
+  for (const seo of ['help.html', 'vs/whop.html', 'tools/whop-fee-calculator.html', 'alternatives/whop-alternatives.html', 'guides/discord-paywall.html']) {
+    const html = page(seo);
+    for (const line of textLinks) assert.ok(html.includes(line), `${seo} is regenerated with "${line}"`);
+  }
+});
+
 test('the hosted demo store: fixed storefront at /demo, discount preview works, nothing purchasable', async () => {
   // The page serves with its own head and the Emerald theme server-rendered.
   const page = await (await fetch(`${appUrl}/demo`)).text();
@@ -3817,6 +4912,12 @@ test('the hosted demo store: fixed storefront at /demo, discount preview works, 
   );
   const demoProd = await (await fetch(`${appUrl}/demo/vip-access`)).text();
   assert.match(demoProd, /VIP Access — Dues Membership/, 'demo product links carry product previews');
+  // ...and canonicalise to themselves, the way a real store's product page
+  // does. The demo branch hardcoded /demo, which told Google to index the
+  // store instead of the product page it was on.
+  assert.match(demoProd, /<link rel="canonical" href="[^"]*\/demo\/vip-access"/, 'a demo product page is its own canonical');
+  assert.match(demoProd, /property="og:url" content="[^"]*\/demo\/vip-access"/, 'a demo product page shares as itself');
+  assert.match(page, /<link rel="canonical" href="[^"]*\/demo"/, 'the demo store itself still canonicalises to /demo');
   // /store/<slug> is the same overall URL, everywhere.
   const red = await fetch(`${appUrl}/store/demo`, { redirect: 'manual' });
   assert.equal(red.status, 308);
@@ -3824,6 +4925,11 @@ test('the hosted demo store: fixed storefront at /demo, discount preview works, 
   // The plans payload is fixed, flagged, and never touches the database.
   const plans = await (await fetch(`${appUrl}/api/plans?store=demo`)).json();
   assert.equal(plans.brand, 'Dues Membership');
+  // The avatar box is 96 CSS px on the one page sellers judge their own store
+  // by; the 48px favicon painted there was a 2x upscale (4x on retina).
+  assert.equal(plans.server.iconUrl, '/favicon-96x96.png', 'the demo avatar is the asset that fits its box');
+  const avatar = await fs.promises.readFile(new URL('../public/favicon-96x96.png', import.meta.url));
+  assert.deepEqual([avatar.readUInt32BE(16), avatar.readUInt32BE(20)], [96, 96], 'and that asset really is 96x96');
   assert.equal(plans.capabilities.demo, true, 'the client needs the demo flag to disarm pay');
   assert.equal(plans.capabilities.stripe, true, 'the checkout still renders fully');
   assert.deepEqual(plans.plans.map((p) => p.priceUsd), [49.99, 14.99, 79.99]);
@@ -4002,6 +5108,7 @@ test('store reviews: bought-only, seller cannot subtract, all-or-nothing switch,
   const list = async (cookie) =>
     (await (await fetch(`${appUrl}/api/reviews?store=vip-signals`, { headers: cookie ? { cookie } : {} })).json());
   const publicStore = async (slug) => (await (await fetch(`${appUrl}/api/plans?store=${slug}`)).json()).store;
+  const gate = (d) => ({ canWrite: d.canWrite, writeBlock: d.writeBlock });
   const storeCall = (body) =>
     fetch(`${appUrl}/api/admin/store`, {
       method: 'POST',
@@ -4020,15 +5127,22 @@ test('store reviews: bought-only, seller cannot subtract, all-or-nothing switch,
   assert.equal(stranger.status, 403, 'a non-customer cannot review');
   assert.match((await stranger.json()).error, /bought from this store/);
   assert.equal(await rowCount(), 0, 'and nothing was written');
+  // The same verdict is reported up front on GET, so the storefront offers the
+  // composer only to someone whose post will land — and can say why to the rest.
+  assert.deepEqual(gate(await list(null)), { canWrite: false, writeBlock: 'signin' });
+  assert.deepEqual(gate(await list(u14Cookie)), { canWrite: false, writeBlock: 'notbuyer' }, 'a non-customer is told the composer is not for them');
+  assert.deepEqual(gate(await list(u7Cookie)), { canWrite: false, writeBlock: 'owner' }, 'the seller is offered no composer for their own store');
 
   // A brand-new purchase is still inside the cooling window.
   await tq('INSERT INTO subscriptions (store_id, discord_id, plan_id, provider, provider_ref, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
     [storeId, U8, 'vip-access', 'stripe', 'sub_review_e2e', 'active', Math.floor(Date.now() / 1000), Math.floor(Date.now() / 1000)]);
   assert.equal((await post(u8Cookie, { store: 'vip-signals', rating: 5 })).status, 403, 'reviews open after a cooling period');
+  assert.deepEqual(gate(await list(u8Cookie)), { canWrite: false, writeBlock: 'cooling' }, 'inside the window the composer is withheld, with the reason');
 
   // Age that purchase past the window and the same buyer may speak.
   const old = Math.floor(Date.now() / 1000) - 10 * 24 * 60 * 60;
   await tq('UPDATE subscriptions SET created_at = ? WHERE provider_ref = ?', [old, 'sub_review_e2e']);
+  assert.deepEqual(gate(await list(u8Cookie)), { canWrite: true, writeBlock: null }, 'past the window the buyer is offered the composer');
   assert.equal((await post(u8Cookie, { store: 'vip-signals', rating: 9 })).status, 400, 'a rating outside 1-5 is not a rating');
   const wrote = await post(u8Cookie, { store: 'vip-signals', rating: 2, body: 'Signals were fine, pace was not for me.' });
   assert.equal(wrote.status, 200);
@@ -4066,6 +5180,7 @@ test('store reviews: bought-only, seller cannot subtract, all-or-nothing switch,
   assert.equal(pub.reviews.on, true);
   assert.equal(pub.reviews.count, 1);
   assert.equal(pub.reviews.average, 4);
+  assert.equal((await list(u14Cookie)).writeBlock, 'notbuyer', 'the switch changes what is shown, never who may write');
 
   // THE CENTRAL RULE: there is no request a seller can make that removes,
   // hides or reorders ONE review. Every shape of the attempt is refused.
@@ -4089,6 +5204,19 @@ test('store reviews: bought-only, seller cannot subtract, all-or-nothing switch,
   assert.match((await list(null)).reviews[0].reply.body, /two channels/);
   // A reply from someone who does not own the store is a 403.
   assert.equal((await post(u8Cookie, { store: 'vip-signals', action: 'reply', id: 1, body: 'nope' })).status, 403);
+
+  // Public text is text. String() published "[object Object]" under the
+  // store's name behind a 200, and an absent body published "undefined"
+  // over whatever the seller had written.
+  const replyId = (await list(u7Cookie)).reviews[0].id;
+  for (const value of [{ a: 1 }, true, [1, 2], 7]) {
+    assert.equal((await post(u7Cookie, { store: 'vip-signals', action: 'reply', id: replyId, body: value })).status, 400, `reply body ${JSON.stringify(value)}`);
+    assert.equal((await post(u8Cookie, { store: 'vip-signals', rating: 4, body: value })).status, 400, `review body ${JSON.stringify(value)}`);
+  }
+  assert.equal((await post(u7Cookie, { store: 'vip-signals', action: 'reply', id: replyId })).status, 400, 'an absent reply body is not a clear');
+  assert.match((await list(null)).reviews[0].reply.body, /two channels/, 'none of those touched the reply');
+  assert.equal((await post(u7Cookie, { store: 'vip-signals', action: 'reply', id: replyId, body: '' })).status, 200, "'' is still the way to take a reply down");
+  assert.equal((await list(null)).reviews[0].reply, null);
 
   // The AUTHOR may withdraw their own words — the one delete that exists.
   assert.equal((await post(u8Cookie, { store: 'vip-signals', action: 'withdraw' })).status, 200);
@@ -4114,6 +5242,47 @@ test('store reviews: bought-only, seller cannot subtract, all-or-nothing switch,
   assert.equal(dstore.reviews.count, 1, 'the seller sees the true count regardless of the switch');
   assert.equal(dstore.reviews.average, 5);
   assert.equal(dstore.reviewsOn, false, 'and the dashboard payload carries the switch back to the form');
+});
+
+test('storefront client: the failure states the suite cannot drive in a browser are pinned in the source', async () => {
+  // These are client-side renders (no DOM here), so each is held by the line
+  // of source that fixes it. Each was a live bug measured in Chromium.
+  const read = (p) => fs.readFileSync(new URL(`../public/${p}`, import.meta.url), 'utf8');
+  const app = read('app.js');
+  // The "All products" button counts PRODUCTS, like main()'s routing does: a
+  // one-product store whose product has price options must not grow a button
+  // leading to a one-card shop it was designed never to show.
+  assert.match(app, /const multi = state\.plans\.filter\(\(p\) => !p\.variantOf\)\.length > 1;/, 'the back-to-shop button counts products, not price options');
+  // "Lifetime (lifetime)": the parent option's synthesised label is its cadence.
+  assert.match(app, /sameWord \? '' : `<small>\$\{cadence\}<\/small>`/, 'the cadence suffix is dropped when the label already is the cadence');
+  // A Discord CDN miss falls back to the letter placeholder instead of a hole,
+  // and a url that already failed is not re-shown by the next render.
+  assert.match(app, /icon\.dataset\.failed !== state\.server\.iconUrl/, 'the shop avatar remembers a failed url');
+  assert.match(app, /logo\.dataset\.failed !== state\.server\.iconUrl/, 'the checkout server icon remembers a failed url');
+  const store = read('store.html');
+  const img = (marker) => store.match(new RegExp(`<img[^>]*${marker}[^>]*>`))?.[0] ?? '';
+  assert.match(img('id="shop-icon"'), /onerror="[^"]*shop-icon-ph[^"]*"/, '#shop-icon swaps to the placeholder on error');
+  assert.match(img('class="logo op-server-icon"'), /onerror="[^"]*this\.hidden = true[^"]*"/, '.op-server-icon hides itself on error');
+  // The composer is gated on the server's verdict, never offered to a 403.
+  assert.match(app, /if \(!mine && !reviewState\.canWrite\)/, 'the review composer is gated on canWrite');
+  // With scripts off the app pages say so instead of rendering an empty shell.
+  for (const f of ['store.html', 'dashboard.html', 'account.html', 'receipt.html']) {
+    const m = read(f).match(/<noscript>([\s\S]*?)<\/noscript>/);
+    assert.ok(m, `${f} must carry a <noscript> line`);
+    assert.match(m[1].replace(/<[^>]+>/g, ''), /JavaScript enabled/, `${f}'s no-script line must say what is needed`);
+  }
+  // A receipt with no order behind it says so, rather than sitting on
+  // "Payment received / Finishing up your order…" forever.
+  const receipt = read('receipt.js');
+  // ...and ONLY a receipt with no order behind it. 404 is the single answer
+  // /api/plans gives for an unknown store; a 5xx out of guard() or a 429 is a
+  // blip, and telling a buyer who just paid that their link points at nothing
+  // is a false claim the old stuck-pending page never made.
+  assert.match(receipt, /if \(plansRes\.status === 404\) return showNotFound\(\)/, 'only a 404 renders the not-found receipt');
+  assert.doesNotMatch(receipt, /if \(!plansRes\.ok\) return showNotFound\(\)/, 'a transient /api/plans failure must not claim the order does not exist');
+  assert.match(receipt, /plansRes\.ok \? await plansRes\.json\(\)/, 'a failed catalogue degrades to empty so the buyer\'s own subscription row still names the order');
+  assert.match(receipt, /if \(!plan\) return showNotFound\(\)/, 'a missing ?plan renders the not-found receipt');
+  assert.match(read('receipt.html'), /<section class="panel" id="r-details">/, 'the details panel is addressable so the not-found state can hide its dashes');
 });
 
 test('store creator and team: seller-authored, validated, and round-tripped to both payloads', async () => {
@@ -4289,6 +5458,26 @@ test('crypto address validation refuses a plausible address on the wrong chain',
   assert.equal(validateAddress('1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa', 'btc').ok, true);
   assert.equal(validateAddress('1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa', 'ltc').ok, false);
   assert.equal(validateAddress('bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4', 'btc').ok, true);
+  // A Bitcoin P2SH address ("3…") shares its version byte with Litecoin's
+  // retired P2SH prefix, so it decodes cleanly on both chains. Both live in
+  // the same wallet app and both start with 3 — it must NOT pass as LTC, and
+  // it must never be reported as checksum-verified for LTC.
+  assert.equal(validateAddress('3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy', 'btc').ok, true);
+  assert.deepEqual(
+    (({ ok, verified }) => ({ ok, verified }))(validateAddress('3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy', 'ltc')),
+    { ok: false, verified: false },
+    'a BTC P2SH address is not a Litecoin payout wallet',
+  );
+  assert.equal(validateAddress('MJRSgZ3UUFcTBTBAaN38XAXvZLwRe8WVw7', 'ltc').ok, true, 'the current LTC P2SH prefix (M…) still works');
+  assert.equal(validateAddress('LM2WMpR1Rp6j3Sa59cMXMs1SPzj9eXpGc1', 'ltc').ok, true);
+  // Cardano: the bech32 checksum alone would pass a six-character string.
+  // A real Shelley address has a header byte and 28-byte hashes behind it.
+  assert.equal(validateAddress('addr1mykd6t', 'ada').ok, false, 'a valid checksum over no payload is not an address');
+  assert.equal(validateAddress('addr1pzrux20ll', 'ada').ok, false);
+  assert.equal(validateAddress('addr1qx2fxv2umyhttkxyxp8x0dlpdt3k6cwng5pxj3jhsydzer3n0d3vllmyqwsx5wktcd8cc3sq835lu7drv2xwl2wywfgse35a3x', 'ada').ok, true, 'CIP-19 base address');
+  assert.equal(validateAddress('addr1vx2fxv2umyhttkxyxp8x0dlpdt3k6cwng5pxj3jhsydzers66hrl8', 'ada').ok, true, 'CIP-19 enterprise address');
+  assert.equal(validateAddress('addr_test1qz2fxv2umyhttkxyxp8x0dlpdt3k6cwng5pxj3jhsydzer3n0d3vllmyqwsx5wktcd8cc3sq835lu7drv2xwl2wywfgs68faae', 'ada').ok, false, 'testnet is not somewhere a payout can go');
+  assert.equal(validateAddress('stake1uyehkck0lajq8gr28t9uxnuvgcqrc6070x3k9r8048z8y5gh6ffgw', 'ada').ok, false, 'a stake address cannot receive a payment');
   assert.equal(validateAddress('TQn9Y2khEsLJW1ChVWFMSMeRDow5KcbLSE', 'usdttrc20').ok, true);
   assert.equal(validateAddress('TQn9Y2khEsLJW1ChVWFMSMeRDow5KcbLSF', 'usdttrc20').ok, false);
   // A chain nobody here can check is stored, but never CLAIMED as checked —
@@ -4350,9 +5539,33 @@ test('crypto: the payout wallet is checksum-checked and has to be typed twice', 
   assert.equal(wrongChain.status, 400);
   assert.match((await wrongChain.json()).error, /Solana/);
 
-  // A coin the merchant account does not have enabled.
-  const offCoin = await npStore({ cryptoWallet: SOL_WALLET, cryptoChain: 'doge' }, npCookie);
+  // A coin NOWPayments cannot pay out to this address. The provider is the
+  // authority on that pair — the deposit list (/merchant/coins) is a
+  // different set and must not be what decides it.
+  const offCoin = await npStore({ cryptoWallet: 'DH5yaieqoZN36fDVciNyRueRGvGLR3mr7L', cryptoChain: 'doge' }, npCookie);
   assert.equal(offCoin.status, 400, 'payouts can only go out in a coin the account can actually send');
+  assert.match((await offCoin.json()).error, /cannot send DOGE payouts/);
+
+  // XMR is enabled for deposits in the mock but payouts cannot settle in
+  // it: gating on the deposit list would save this and every sale would
+  // then fail at the provider, on the buyer's screen.
+  const depositOnly = await npStore(
+    { cryptoWallet: '888tNkZrPN6JsEgekjMnABU4TBzc2Dt29EPAvkRxbANsAnjyPbb3iQ1YBRWKTHmfRUmsdzh1Yg3hCzE5aFbhQirD2u9vnXR', cryptoChain: 'xmr' },
+    npCookie,
+  );
+  assert.equal(depositOnly.status, 400, 'a deposit-only coin is not a payout coin');
+  assert.match((await depositOnly.json()).error, /cannot send XMR payouts/);
+
+  // The converse: Litecoin is NOT in the deposit list, but the provider pays
+  // out in it fine — so the save goes through (after the usual confirm).
+  const LTC_WALLET = 'MJRSgZ3UUFcTBTBAaN38XAXvZLwRe8WVw7';
+  const ltcUnconfirmed = await npStore({ cryptoWallet: LTC_WALLET, cryptoChain: 'ltc' }, npCookie);
+  assert.equal(ltcUnconfirmed.status, 409, 'a payout coin outside the deposit list is not refused — only confirmed');
+  const ltcSaved = await npStore({ cryptoWallet: LTC_WALLET, cryptoChain: 'ltc', cryptoWalletConfirm: LTC_WALLET }, npCookie);
+  assert.equal(ltcSaved.status, 200, await ltcSaved.clone().text());
+  assert.equal((await ltcSaved.json()).store.cryptoChain, 'ltc');
+  const validated = nowpayments.validated.at(-1);
+  assert.deepEqual({ address: validated.address, currency: validated.currency }, { address: LTC_WALLET, currency: 'ltc' }, 'the exact pair the seller is saving is what the provider was asked about');
 
   // Right address, right chain, no confirmation: refused, and told why.
   const unconfirmed = await npStore({ cryptoWallet: SOL_WALLET, cryptoChain: 'sol' }, npCookie);
@@ -4387,9 +5600,16 @@ test('crypto: checkout creates a payment carrying the payout address and its own
   const caps = (await (await fetch(`${appUrl}/api/plans?store=vip-signals`)).json()).capabilities;
   assert.equal(caps.nowpayments, true, 'a wallet plus credentials is what turns the rail on');
 
+  // Every coin toggled off in the dashboard (or a response of a shape the
+  // parser does not know) is "nothing to pay with", not a ready picker —
+  // and it must not be remembered: the very next request asks again.
+  nowpayments.noCoins = true;
+  const none = await (await fetch(`${appUrl}/api/checkout/crypto?coins=1&store=vip-signals`)).json();
+  assert.deepEqual(none, { ready: false, coins: [] }, 'an empty coin list is not a ready rail');
+  nowpayments.noCoins = false;
   const coins = await (await fetch(`${appUrl}/api/checkout/crypto?coins=1&store=vip-signals`)).json();
-  assert.equal(coins.ready, true);
-  assert.deepEqual(coins.coins, ['sol', 'usdtsol', 'btc', 'eth'], 'tickers arrive lowercased and cheapest chains first');
+  assert.equal(coins.ready, true, 'the empty answer was not cached');
+  assert.deepEqual(coins.coins, ['sol', 'usdtsol', 'btc', 'eth', 'xmr'], 'tickers arrive lowercased and cheapest chains first');
 
   const plans = await (await fetch(`${appUrl}/api/plans?store=vip-signals`)).json();
   const plan = plans.plans[0];
@@ -4435,6 +5655,43 @@ test('crypto: checkout creates a payment carrying the payout address and its own
   assert.equal(rows[0].discord_id, NP_BUYER);
   assert.equal(rows[0].provider_ref, 'npid_1');
   npOrder = order;
+});
+
+test('crypto: a payout address with no chain refuses to create a payment rather than paying out in the buyer\'s coin', async () => {
+  // The only writer sets wallet and chain together, but the columns are
+  // independent: a migration or a support edit can leave the chain empty.
+  // That must never become "pay the seller in whatever the buyer sent" —
+  // BTC to a Solana address is the one outcome worse than custody.
+  await tq('UPDATE stores SET crypto_chain = NULL WHERE slug = ?', ['vip-signals']);
+  const before = nowpayments.created.length;
+  try {
+    const plans = await (await fetch(`${appUrl}/api/plans?store=vip-signals`)).json();
+    // And the storefront must not advertise the rail on half a row. One
+    // predicate — wallet AND chain — decides the tile, the coin list and the
+    // payment, so a buyer is never walked through picking a coin only to be
+    // refused at the end of it.
+    assert.equal(plans.capabilities.nowpayments, false, 'half a payout row is not a working crypto rail');
+    assert.deepEqual(
+      await (await fetch(`${appUrl}/api/checkout/crypto?coins=1&store=vip-signals`)).json(),
+      { ready: false, coins: [] },
+      'the coin picker is told there is nothing to pay with, not handed a grid',
+    );
+    const res = await fetch(`${appUrl}/api/checkout/crypto`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: npBuyerCookie },
+      body: JSON.stringify({ store: 'vip-signals', planId: plans.plans[0].id, payCurrency: 'btc' }),
+    });
+    assert.equal(res.status, 409, await res.clone().text());
+    assert.equal(nowpayments.created.length, before, 'the provider must not have been asked');
+    const { createPayment } = await import('../src/lib/nowpayments.js');
+    await assert.rejects(
+      createPayment({ plan: plans.plans[0], store: { cryptoWallet: SOL_WALLET, cryptoChain: '' }, amount: 10, payCurrency: 'btc', orderId: 'np_x' }),
+      /no payout chain/,
+      'the library refuses on its own, whatever the caller checked',
+    );
+  } finally {
+    await tq('UPDATE stores SET crypto_chain = ? WHERE slug = ?', ['sol', 'vip-signals']);
+  }
 });
 
 test('crypto: the pay QR decodes back to the exact payment address', async () => {
@@ -4725,11 +5982,122 @@ test('whole numbers bound for bigint columns are safe integers, and an oversized
     assert.equal((await post('/api/admin/discounts', { action: 'create', code: 'HUGE', kind: 'percent', amount: 10, maxUses: bad })).status, 400, `max uses ${bad}`);
   }
   assert.equal((await post('/api/onboard', { step: 'product-update', storeId, planKey: plan.id, purchaseLimit: 5 })).status, 200);
+  // Pinned the validation; put the product back. Left at 5, the limit was
+  // reached by the buyers above and refused the crypto invoice opened
+  // earlier when it settled — the guard runs again at settlement.
+  assert.equal((await post('/api/onboard', { step: 'product-update', storeId, planKey: plan.id, purchaseLimit: null })).status, 200);
   assert.equal((await post('/api/onboard', { step: 'product', storeId, name: 'Bad term', priceUsd: 10, lifetime: false, durationDays: 'abc' })).status, 400, 'a term that is not a number is refused, never stored as NaN');
   for (const bad of ['99999999999999999999', '9223372036854775808', '1000000000000000000000000']) {
     const r = await deliverStripe({ id: 'evt_bigid', type: 'ping', data: { object: {} } }, { path: `/webhooks/stripe/${bad}` });
     assert.equal(r.status, 404, `store ${bad} on the public route`);
   }
+});
+
+test('the input boundary: bad cookies, null bodies, NUL bytes, wrong types and over-length links are refused, never 500s or silent rewrites', async () => {
+  const loginAs = async (code) => {
+    const login = await fetch(`${appUrl}/auth/login`, { redirect: 'manual' });
+    const st = new URL(login.headers.get('location')).searchParams.get('state');
+    const sc = login.headers.getSetCookie().find((c) => c.startsWith('tl_oauth_state='));
+    const cb = await fetch(`${appUrl}/auth/callback?code=${code}&state=${st}`, { redirect: 'manual', headers: { cookie: sc.split(';')[0] } });
+    return cb.headers.getSetCookie().find((c) => c.startsWith('tl_session=')).split(';')[0];
+  };
+  const u7Cookie = await loginAs('code_u7');
+  const u1Cookie = await loginAs('code_u1'); // the platform owner
+  const post = (path, body, cookie = u7Cookie) =>
+    fetch(`${appUrl}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: typeof body === 'string' ? body : JSON.stringify({ store: 'vip-signals', ...body }) });
+  const storeRow = async () => (await (await post('/api/admin/store', {})).json()).store;
+  const owned = await (await fetch(`${appUrl}/api/admin/payments`, { headers: { cookie: u7Cookie } })).json();
+  const storeId = owned.stores.find((s) => s.slug === 'vip-signals').id;
+  const plan = (await (await fetch(`${appUrl}/api/plans?store=vip-signals`)).json()).plans.find((p) => !p.variantOf);
+
+  // One undecodable cookie ANYWHERE in the jar used to be a URIError and a
+  // 500 on every session-reading route. It is "no such cookie", nothing more.
+  const me = await fetch(`${appUrl}/api/me`, { headers: { cookie: `junk=%E0%A4%A; ${u7Cookie}` } });
+  assert.equal(me.status, 200, 'a stray malformed cookie does not take the session down with it');
+  assert.equal((await me.json()).discordId, '507700000000000007', 'the valid session beside it still signs in');
+  const bad = await fetch(`${appUrl}/api/me`, { headers: { cookie: 'tl_session=%' } });
+  assert.deepEqual(await bad.json(), { loggedIn: false }, 'an undecodable session is simply not a session');
+
+  // The literal JSON `null` parses fine, so the .catch() around readJsonBody
+  // never fired and the next `body.store` was a TypeError.
+  for (const path of ['/api/admin/store', '/api/admin/discounts']) {
+    assert.equal((await post(path, 'null')).status, 404, `${path} with a null body is "unknown store", not a 500`);
+  }
+  assert.equal((await post('/api/admin/settings', 'null', u1Cookie)).status, 200, 'a null settings body changes nothing');
+
+  // U+0000: Postgres refuses the byte with a 500, SQLite silently truncates
+  // the string at it. It is stripped once, at the body boundary, for everyone.
+  assert.equal((await post('/api/admin/store', { name: 'Ev\u0000il' })).status, 200);
+  assert.equal((await storeRow()).name, 'Evil', 'a NUL byte in a store name is dropped, and the rest of the name survives');
+  const nulPlan = await (await post('/api/onboard', { step: 'product-update', storeId, planKey: plan.id, description: 'a\u0000b' })).json();
+  assert.equal(nulPlan.plan.description, 'ab', 'the same at every text field, product descriptions included');
+
+  // A discount kind that is not exactly one of the two must not become a
+  // percentage: "$50 off" booked as "50% off" is a materially different sale.
+  assert.equal((await post('/api/admin/discounts', { action: 'create', code: 'KIND1', kind: 'FIXED', amount: 50 })).status, 400, "'FIXED' is not 'fixed'");
+  assert.equal((await post('/api/admin/discounts', { action: 'create', code: 'KIND1', kind: 'coupon', amount: 50 })).status, 400);
+  assert.equal((await post('/api/admin/discounts', { action: 'create', code: 'KIND1', amount: 10 })).status, 200, 'omitting the kind still means percent');
+  assert.equal((await post('/api/admin/discounts', { action: 'delete', code: 'KIND1' })).status, 200);
+
+  // Links pass the https regex at full length and were then cut at 500 —
+  // still a valid URL, to somewhere the seller never chose.
+  const long = 'https://a.test/?utm=' + 'x'.repeat(900);
+  assert.equal((await post('/api/onboard', { step: 'product-update', storeId, planKey: plan.id, successUrl: long })).status, 400, 'an over-length success URL is refused');
+  assert.equal((await post('/api/onboard', { step: 'product-update', storeId, planKey: plan.id, imageUrl: long })).status, 400, 'an over-length photo link is refused');
+  assert.equal((await post('/api/onboard', { step: 'product', storeId, name: 'Long pic', priceUsd: 10, lifetime: true, imageUrl: long })).status, 400);
+  assert.equal((await post('/api/admin/store', { bannerUrl: long })).status, 400, 'an over-length banner URL is refused');
+  const okUrl = 'https://a.test/ok?' + 'y'.repeat(470);
+  assert.equal((await post('/api/onboard', { step: 'product-update', storeId, planKey: plan.id, successUrl: okUrl })).status, 200, 'a link that fits is stored whole');
+  assert.equal((await post('/api/onboard', { step: 'product-update', storeId, planKey: plan.id, successUrl: '' })).status, 200);
+
+  // The wrong type for links or prefs used to read as "no keys" and wiped the
+  // stored value behind a 200. null clears; anything else that is not an
+  // object is refused with the stored value untouched.
+  assert.equal((await post('/api/admin/store', { dashboardPrefs: { accent: '#aabbcc', defaultRange: '90' }, links: { x: 'https://x.com/vip' } })).status, 200);
+  assert.equal((await post('/api/admin/store', { dashboardPrefs: '#aabbcc' })).status, 400, 'a bare string is not a prefs object');
+  assert.equal((await post('/api/admin/store', { links: 'abc' })).status, 400, 'links must be an object');
+  assert.equal((await post('/api/admin/store', { links: [] })).status, 400, 'a list is not a links object either');
+  const kept = await storeRow();
+  assert.deepEqual(kept.dashboardPrefs, { accent: '#aabbcc', defaultRange: '90' }, 'the refused save left the prefs alone');
+  assert.deepEqual(kept.links, { x: 'https://x.com/vip' }, 'the refused save left the links alone');
+  assert.equal((await post('/api/admin/store', { dashboardPrefs: null, links: null })).status, 200, 'null is the one way to clear');
+  const cleared = await storeRow();
+  assert.equal(cleared.dashboardPrefs, null);
+  assert.equal(cleared.links, null);
+
+  // Text fields are text. String() persisted "[object Object]" as the store
+  // name with a 200, and the plan key "object-object" for a product.
+  for (const value of [{ a: 1 }, true, [1, 2], 7]) {
+    assert.equal((await post('/api/admin/store', { name: value })).status, 400, `store name ${JSON.stringify(value)}`);
+    assert.equal((await post('/api/admin/store', { description: value })).status, 400, `store description ${JSON.stringify(value)}`);
+    assert.equal((await post('/api/onboard', { step: 'product', storeId, name: value, priceUsd: 10, lifetime: true })).status, 400, `product name ${JSON.stringify(value)}`);
+    assert.equal((await post('/api/onboard', { step: 'product-update', storeId, planKey: plan.id, name: value })).status, 400, `product rename ${JSON.stringify(value)}`);
+    // The option label is the third product-writing step, and the one that
+    // turns its input into a plan key no later edit can change: String()
+    // made the permanent key "vip-object-object" behind a 200.
+    assert.equal((await post('/api/onboard', { step: 'variant', storeId, planKey: plan.id, label: value, priceUsd: 12, lifetime: true })).status, 400, `option label ${JSON.stringify(value)}`);
+  }
+  assert.ok(
+    !(await (await fetch(`${appUrl}/api/plans?store=vip-signals`)).json()).plans.some((p) => /object-object|^true$|1,2|^7$/.test(p.planKey)),
+    'none of those minted an option',
+  );
+  assert.equal((await storeRow()).name, 'Evil', 'none of those wrote anything');
+  assert.equal((await post('/api/admin/store', { name: 'VIP Signals' })).status, 200);
+
+  // The receipt sender is the From header of every receipt: an address, or a
+  // name in front of one. Resend rejects anything else and the only symptom
+  // used to be receipts quietly stopping.
+  // The specials belong in quotes: `Dues, Inc <a@b.co>` is not a mailbox at
+  // all (the comma ends the address) and Resend rejects it — receipts then
+  // stop with no symptom. The check used to admit exactly those and refuse
+  // the quoted spelling that works.
+  for (const from of ['not an email at all', '<script>alert(1)</script>', 'Dues <a@b>', 'Dues <a@b.c', 'x\r\nbcc: y@z.io', 'Dues, Inc <a@b.co>', 'a:b;c <a@b.co>', 'x@y.z <a@b.co>']) {
+    assert.equal((await post('/api/admin/settings', { receiptFrom: from }, u1Cookie)).status, 400, `receiptFrom ${JSON.stringify(from)}`);
+  }
+  assert.equal((await post('/api/admin/settings', { receiptFrom: '"Dues, Inc" <receipts@tradeleaks.e2e>' }, u1Cookie)).status, 200, 'a quoted display name is the RFC spelling, not a refusal');
+  const settings = await (await fetch(`${appUrl}/api/admin/settings`, { headers: { cookie: u1Cookie } })).json();
+  assert.equal(settings.receiptFrom, '"Dues, Inc" <receipts@tradeleaks.e2e>', 'the refused senders changed nothing');
+  assert.equal((await post('/api/admin/settings', { receiptFrom: 'Dues <receipts@tradeleaks.e2e>' }, u1Cookie)).status, 200, 'a real Name <address> sender is accepted');
 });
 
 test('a buyer on the card form holds a seat and a discount use; an option upgrade ends the earlier option', async () => {
@@ -5053,7 +6421,1202 @@ test('crypto: an IPN whose order is not ours is answered, and grants nothing', a
   assert.equal(await subRow('nowpayments', 'npid_stranger'), null);
 });
 
+test('a kicked bot is named as the cause (not a buyer who has not joined), the sweep stops hammering that guild, and a phantom "already a member" join cannot spin', async () => {
+  // Discord answers 404 to GET member for two very different reasons:
+  // Unknown Member (the buyer is not in the server) and Unknown Guild (the
+  // BOT is not in the server). Both used to become null, so a kicked bot
+  // read as "buyer not in guild → try guilds.join → 403 Missing Access" once
+  // per member per sweep — the log blamed every buyer's join, and the guild
+  // took two doomed calls per member every hour.
+  const loginAs = async (code) => {
+    const login = await fetch(`${appUrl}/auth/login`, { redirect: 'manual' });
+    const st = new URL(login.headers.get('location')).searchParams.get('state');
+    const sc = login.headers.getSetCookie().find((c) => c.startsWith('tl_oauth_state='));
+    const cb = await fetch(`${appUrl}/auth/callback?code=${code}&state=${st}`, { redirect: 'manual', headers: { cookie: sc.split(';')[0] } });
+    return cb.headers.getSetCookie().find((c) => c.startsWith('tl_session=')).split(';')[0];
+  };
+  const u7Cookie = await loginAs('code_u7');
+  const member = (body) =>
+    fetch(`${appUrl}/api/admin/member`, { method: 'POST', headers: { 'content-type': 'application/json', cookie: u7Cookie }, body: JSON.stringify({ store: 'vip-signals', ...body }) });
+  const plans = (await (await fetch(`${appUrl}/api/plans?store=vip-signals`)).json()).plans;
+  const plan = plans.find((p) => !p.variantOf && !p.requiredRoleName);
+  const logSince = (mark) => appLog.slice(mark).join('');
+
+  // Two live members of the store, both in the server, both holding the role.
+  const KA = '531100000000000031';
+  const KB = '532200000000000032';
+  for (const uid of [KA, KB]) {
+    discord.members.set(uid, new Set());
+    const granted = await member({ action: 'grant', discordId: uid, planId: plan.id });
+    assert.equal(granted.status, 200, await granted.text());
+    assert.ok(memberRoles(uid).has(R2_VIP), 'the grant delivered the role');
+  }
+
+  discord.kickedFrom = G2;
+  discord.kickedMemberGets = 0;
+  try {
+    // A resync of a member who IS in the server: the failure names the bot,
+    // never a join the buyer supposedly still owes.
+    const mark = appLog.length;
+    const resync = await member({ action: 'resync', discordId: KA });
+    assert.equal(resync.status, 500, 'the outage is a failure, not a silent no-op');
+    await waitFor('the resync failure to name the bot', () => /the bot is not in guild 900000000000000002/.test(logSince(mark)));
+    assert.doesNotMatch(logSince(mark), /join .* to guild failed/, 'no guilds.join is attempted for a guild the bot is gone from');
+    assert.equal(discord.joins.filter((j) => j.uid === KA).length, 0, 'no join was sent');
+
+    // The hourly sweep: one line naming the guild, one member fetch against
+    // it (the store's other members are skipped this run), the guild carried
+    // in the cron response, and every OTHER store still reconciled.
+    const sweepMark = appLog.length;
+    discord.kickedMemberGets = 0;
+    const cron = await hitCron();
+    assert.equal(cron.status, 200, cron.body);
+    const sweep = JSON.parse(cron.body);
+    assert.deepEqual(sweep.guildsWithoutBot, [G2], 'the cron response carries the guild the bot is missing from');
+    assert.ok(sweep.membersReconciled > 0, 'members of the other stores were still reconciled');
+    assert.equal(discord.kickedMemberGets, 1, 'exactly one member fetch hit the kicked guild — the rest of that store was skipped');
+    await waitFor('the sweep to name the guild', () => /\[sweep\] the bot is not in guild/.test(logSince(sweepMark)));
+    const sweepLog = logSince(sweepMark);
+    assert.equal((sweepLog.match(/\[sweep\] the bot is not in guild 900000000000000002/g) ?? []).length, 1, 'the outage is logged once per sweep, not once per member');
+    assert.doesNotMatch(sweepLog, /join .* to guild failed with 403/, 'no member of that store is blamed for a join failure');
+    assert.doesNotMatch(sweepLog, /not in guild 900000000000000002 and no OAuth token/, 'nobody there is diagnosed as a buyer who has not joined');
+  } finally {
+    discord.kickedFrom = null;
+  }
+  // The bot is re-invited: the next sweep reconciles the store again, as before.
+  const back = JSON.parse((await hitCron()).body);
+  assert.equal(back.guildsWithoutBot, undefined);
+  assert.ok(memberRoles(KA).has(R2_VIP) && memberRoles(KB).has(R2_VIP), 'nothing was torn off during the outage');
+
+  // The recursion bound. A buyer with a stored guilds.join token is missing
+  // from the server; Discord answers the join with 204 "already a member" yet
+  // keeps answering 404 to the member fetch. reconcileNow used to call itself
+  // until the two agreed — thousands of requests inside one sweep. Now: one
+  // join, one more look, one warning, and the next reconcile tries again.
+  const KC = '533300000000000033';
+  discord.oauthUsers.code_kc = { id: KC, username: 'phantom_member' };
+  discord.members.set(KC, new Set());
+  await loginAs('code_kc'); // stores the OAuth token the join path needs
+  const granted = await member({ action: 'grant', discordId: KC, planId: plan.id });
+  assert.equal(granted.status, 200, await granted.text());
+  discord.members.delete(KC);
+  discord.phantomJoinsFor.add(KC);
+  discord.phantomJoins = 0;
+  try {
+    const mark = appLog.length;
+    const t0 = Date.now();
+    const cron = await hitCron();
+    assert.equal(cron.status, 200, cron.body);
+    assert.ok(Date.now() - t0 < 5000, 'the sweep returned promptly');
+    assert.equal(discord.phantomJoins, 1, 'exactly one join attempt, then the reconcile stopped');
+    await waitFor('the disagreement to be logged and left for the next reconcile', () =>
+      /Discord reports 533300000000000033 already in guild 900000000000000002 but the member fetch still answers 404/.test(logSince(mark)));
+  } finally {
+    discord.phantomJoinsFor.delete(KC);
+  }
+  // Once Discord agrees with itself, the next reconcile lands the role.
+  assert.equal((await member({ action: 'resync', discordId: KC })).status, 200);
+  assert.deepEqual(discord.joins.filter((j) => j.uid === KC).map((j) => j.roles), [[R2_VIP]], 'the real join carried the role');
+  assert.ok(memberRoles(KC).has(R2_VIP));
+});
+
+// The IPN is a claim on the WORK, not on the delivery. NOWPayments sends one
+// IPN per status transition and the handler re-reads the payment every time,
+// so on a fast chain several deliveries all read `finished`: keyed on the
+// body's status, every one of them ran the completion side effects. And a
+// delivery whose re-read has not caught up yet is answered 5xx so the
+// provider brings it back — a 200 there consumed the only `finished` this
+// payment would ever send.
+const npStoreId = async () =>
+  (await (await fetch(`${appUrl}/api/admin/payments`, { headers: { cookie: npCookie } })).json()).stores.find((s) => s.slug === 'vip-signals').id;
+const npPlan = async () => (await (await fetch(`${appUrl}/api/plans?store=vip-signals`)).json()).plans[0];
+async function npOpenOrder({ storeId, plan, uid, orderId, ref, status, age, discountCode = null, amount = plan.priceUsd }) {
+  discord.members.set(uid, new Set());
+  await tq(
+    "INSERT INTO checkout_attempts (store_id, plan_id, discord_id, session_id, amount_usd, currency, discount_code, provider_ref, status, created_at) VALUES (?, ?, ?, ?, ?, 'usd', ?, ?, 'started', ?)",
+    [storeId, plan.id, uid, orderId, amount, discountCode, ref, nowSec() - age],
+  );
+  const payment = {
+    payment_id: ref, payment_status: status, order_id: orderId, price_amount: amount, price_currency: 'usd',
+    pay_currency: 'sol', pay_amount: 0.5, actually_paid: status === 'finished' ? 0.5 : 0,
+  };
+  nowpayments.payments.set(ref, payment);
+  return payment;
+}
+const attemptStatus = async (orderId) => (await tq('SELECT status FROM checkout_attempts WHERE session_id = ?', [orderId])).rows[0].status;
+
+test('crypto: a lagging re-read is retried rather than consumed, and the completion side effects run once per sale', async () => {
+  const storeId = await npStoreId();
+  const plan = await npPlan();
+  await tq("INSERT INTO discounts (store_id, code, kind, amount, plan_key, max_uses, uses, expires_at, created_at) VALUES (?, 'CRYPTO10', 'percent', 10, NULL, 5, 0, NULL, ?)", [storeId, nowSec()]);
+  const uses = async () => Number((await tq('SELECT uses FROM discounts WHERE store_id = ? AND code = ?', [storeId, 'CRYPTO10'])).rows[0].uses);
+  const LAG = '515000000000000016';
+  const orderId = `np_${'a'.repeat(32)}`;
+  const payment = await npOpenOrder({ storeId, plan, uid: LAG, orderId, ref: 'npid_lag', status: 'confirming', age: 60, discountCode: 'CRYPTO10', amount: Math.round(plan.priceUsd * 90) / 100 });
+  const pings0 = discord.channelPosts.length;
+
+  // The signed `finished` lands while GET /payment still answers confirming.
+  const lagging = await deliverNow({ payment_id: 'npid_lag', payment_status: 'finished', order_id: orderId });
+  assert.equal(lagging.status, 503, 'a finished delivery the re-read cannot confirm is not a terminal outcome — the provider must bring it back');
+  assert.equal(await subRow('nowpayments', 'npid_lag'), null);
+  assert.deepEqual(await claimRows('nowpayments:npid_lag:%'), [], 'no claim is held on work that did not happen');
+  assert.equal(await attemptStatus(orderId), 'started');
+
+  // The provider catches up. Whichever delivery re-reads `finished` first
+  // does the work — here a late in-flight one, which is exactly the case
+  // a per-delivery claim let through twice...
+  payment.payment_status = 'finished';
+  payment.actually_paid = 0.5;
+  const late = await deliverNow({ payment_id: 'npid_lag', payment_status: 'confirming', order_id: orderId });
+  assert.deepEqual([late.status, late.body], [200, 'ok']);
+  assert.ok(memberRoles(LAG).has(R2_VIP), 'the role lands');
+  assert.equal(await attemptStatus(orderId), 'completed');
+  assert.equal(await uses(), 1);
+  assert.equal(discord.channelPosts.length, pings0 + 1);
+  assert.match(discord.channelPosts.at(-1).body.embeds[0].description, /paid in SOL/);
+  // ...and every later delivery, whatever status it carries, finds it done.
+  for (const status of ['finished', 'sending', 'finished']) {
+    const r = await deliverNow({ payment_id: 'npid_lag', payment_status: status, order_id: orderId });
+    assert.deepEqual([r.status, r.body], [200, 'duplicate'], `a ${status} delivery after the grant`);
+  }
+  assert.equal(await uses(), 1, 'a five-use code burns one use on one sale');
+  assert.equal(discord.channelPosts.length, pings0 + 1, 'one sale, one ping');
+  assert.equal((await claimRows('nowpayments:npid_lag:%')).length, 1, 'one claim: the work');
+});
+
+test('crypto: a claim left by an invocation that died is retaken, and the cron recovers a finished payment whose IPN never came', async () => {
+  const storeId = await npStoreId();
+  const plan = await npPlan();
+  const DIED = '515000000000000017';
+  const LOST = '515000000000000018';
+  const GONE = '515000000000000019';
+  const O_DIED = `np_${'b'.repeat(32)}`;
+  const O_LOST = `np_${'c'.repeat(32)}`;
+  const O_GONE = `np_${'d'.repeat(32)}`;
+  await npOpenOrder({ storeId, plan, uid: DIED, orderId: O_DIED, ref: 'npid_died', status: 'finished', age: 60 });
+  await npOpenOrder({ storeId, plan, uid: LOST, orderId: O_LOST, ref: 'npid_lost', status: 'finished', age: 7200 });
+  await npOpenOrder({ storeId, plan, uid: GONE, orderId: O_GONE, ref: 'npid_gone', status: 'expired', age: 7200 });
+
+  // 1. Another invocation took the claim on this very work 30 seconds ago
+  // and may still be running: neither duplicate it nor consume the delivery.
+  await tq("INSERT INTO webhook_events (event_id, provider, received_at) VALUES ('nowpayments:npid_died:finished', 'nowpayments', ?)", [nowSec() - 30]);
+  const held = await deliverNow({ payment_id: 'npid_died', payment_status: 'finished', order_id: O_DIED });
+  assert.equal(held.status, 503, 'work someone else holds is "come back", never "done"');
+  assert.equal(await subRow('nowpayments', 'npid_died'), null);
+  // Fifteen minutes on with the order still open, the holder can only be an
+  // invocation the platform killed before its catch ran (the limit is 60s).
+  await tq("UPDATE webhook_events SET received_at = ? WHERE event_id = 'nowpayments:npid_died:finished'", [nowSec() - 900]);
+  const retaken = await deliverNow({ payment_id: 'npid_died', payment_status: 'finished', order_id: O_DIED });
+  assert.deepEqual([retaken.status, retaken.body], [200, 'ok'], 'a stale claim on undone work is retaken, not honoured');
+  assert.ok(memberRoles(DIED).has(R2_VIP));
+  assert.equal(await attemptStatus(O_DIED), 'completed');
+
+  // 2. No IPN ever arrived for a payment that finished two hours ago — the
+  // provider's retries are spent, the coins are in the seller's wallet.
+  const pings0 = discord.channelPosts.length;
+  const cron = await hitCron();
+  assert.equal(cron.status, 200, cron.body);
+  const body = JSON.parse(cron.body);
+  assert.equal(body.cryptoBackfill?.recovered, 1, `the cron recovers the sale: ${cron.body}`);
+  assert.equal(body.cryptoBackfill?.closed, 1, `and closes the invoice the provider expired: ${cron.body}`);
+  assert.ok(memberRoles(LOST).has(R2_VIP), 'the role is delivered');
+  assert.equal(await attemptStatus(O_LOST), 'completed');
+  assert.equal(discord.channelPosts.length, pings0 + 1, 'the seller is pinged');
+  assert.equal(await attemptStatus(O_GONE), 'expired', 'an invoice closed unpaid is closed here too');
+  // A second sweep has nothing open left and asks the provider nothing.
+  const reqs = nowpayments.requests;
+  assert.deepEqual(JSON.parse((await hitCron()).body).cryptoBackfill, { checked: 0, recovered: 0, closed: 0 });
+  assert.equal(nowpayments.requests, reqs);
+  // The real delivery finally lands: acknowledged, and nothing happens twice.
+  const lateIpn = await deliverNow({ payment_id: 'npid_lost', payment_status: 'finished', order_id: O_LOST });
+  assert.deepEqual([lateIpn.status, lateIpn.body], [200, 'duplicate']);
+  assert.equal(discord.channelPosts.length, pings0 + 1, 'no second ping');
+});
+
+test('cron: idempotency claims older than any provider retry window are purged, younger ones stay', async () => {
+  await tq("INSERT INTO webhook_events (event_id, provider, received_at) VALUES ('stripe:evt_ancient', 'stripe', ?)", [nowSec() - 10 * 86400]);
+  assert.equal((await claimRows('nowpayments:npid_lag:%')).length, 1);
+  const body = JSON.parse((await hitCron()).body);
+  assert.ok(body.claimsPurged >= 1, JSON.stringify(body));
+  assert.deepEqual(await claimRows('stripe:evt_ancient'), [], 'a claim no retry can ever match again is gone');
+  assert.equal((await claimRows('nowpayments:npid_lag:%')).length, 1, 'a claim inside the window stays');
+});
+
+test("crypto: an open invoice holds its seat and its discount use for the invoice's life, a buyer's live invoices are capped, and a settled order polls as paid without its payment id", async () => {
+  const post = (path, body, cookie = npCookie) =>
+    fetch(`${appUrl}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ store: 'vip-signals', ...body }) });
+  const start = (cookie, body) => post('/api/checkout/crypto', { payCurrency: 'sol', ...body }, cookie);
+  const owned = await (await fetch(`${appUrl}/api/admin/payments`, { headers: { cookie: npCookie } })).json();
+  const storeId = owned.stores.find((s) => s.slug === 'vip-signals').id;
+  const seat = JSON.parse(await (await post('/api/onboard', { step: 'product', storeId, name: 'Crypto Seat', priceUsd: 40, lifetime: true })).text()).plan;
+  assert.equal((await post('/api/onboard', { step: 'role', storeId, planKey: seat.planKey, roleId: R2_VIP })).status, 200);
+  assert.equal((await post('/api/onboard', { step: 'product-update', storeId, planKey: seat.planKey, purchaseLimit: 1 })).status, 200);
+  assert.equal((await post('/api/admin/discounts', { action: 'create', code: 'NPONE', kind: 'percent', amount: 10, maxUses: 1 })).status, 200);
+  const A = '525500000000000025';
+  const B = '526600000000000026';
+  const C = '527700000000000027';
+  for (const u of [A, B, C]) discord.members.set(u, new Set());
+  const aCookie = await signInAs('code_np_a', A, 'np_a');
+  const bCookie = await signInAs('code_np_b', B, 'np_b');
+  const cCookie = await signInAs('code_np_c', C, 'np_c');
+
+  // A takes the one seat and the one-use code on an invoice nobody has paid.
+  const a1 = await start(aCookie, { planId: seat.planKey, discountCode: 'NPONE' });
+  assert.equal(a1.status, 200, await a1.clone().text());
+  const aOrder = await a1.json();
+  const rowOf = async (id) => (await tq('SELECT * FROM checkout_attempts WHERE session_id = ?', [id])).rows[0];
+  // The hold is the provider's payment window (a week), NOT the rate quote's
+  // expiry the pay screen counts down to (the mock's estimate is 20 minutes
+  // out, the card TTL is 35) — the deposit address stays payable long past
+  // that quote, and a late `finished` grants, so a seat released at the quote
+  // is a seat sold twice. Three distinct numbers, so neither the old estimate
+  // nor the card-form fallback can satisfy this.
+  assert.ok(Math.abs(asNum((await rowOf(aOrder.orderId)).expires_at) - (nowSec() + 7 * 86400)) < 120,
+    "the row holds its seat for the provider's whole payment window, not the rate quote's expiry");
+  assert.ok(Math.abs(Date.parse(aOrder.expiresAt) / 1000 - (nowSec() + 20 * 60)) < 120,
+    "the buyer's countdown is still the quoted amount's expiry");
+  // B is refused the seat, and the code — a subscriptions row lands only when
+  // the IPN does, and a crypto invoice can sit unpaid for hours before that.
+  const bSeat = await start(bCookie, { planId: seat.planKey });
+  assert.equal(bSeat.status, 409);
+  assert.match(await bSeat.text(), /sold out/);
+  assert.equal((await post('/api/onboard', { step: 'product-update', storeId, planKey: seat.planKey, purchaseLimit: null })).status, 200);
+  const bCode = await start(bCookie, { planId: seat.planKey, discountCode: 'NPONE' });
+  assert.equal(bCode.status, 400, await bCode.text());
+  // ...and the Apply button says the same thing the Pay button will. The
+  // preview used to answer on `uses < max_uses` alone, so it reported "NPONE
+  // applied, you save $4" for a use A's open invoice was holding — a promise
+  // the next click broke, for as long as that invoice lives.
+  const previewOf = (cookie) => fetch(`${appUrl}/api/discount?store=vip-signals&code=NPONE&plan=${seat.planKey}`, { headers: { cookie } });
+  assert.equal((await previewOf(bCookie)).status, 404, "the preview refuses a use another buyer's open checkout holds");
+  assert.equal((await previewOf(aCookie)).status, 200, "the holder's own reservation is never held against them");
+  assert.equal((await post('/api/onboard', { step: 'product-update', storeId, planKey: seat.planKey, purchaseLimit: 1 })).status, 200);
+  // Older than any card form could live, but the provider still takes money
+  // for it: the seat is still A's.
+  await tq('UPDATE checkout_attempts SET created_at = ? WHERE session_id = ?', [nowSec() - 2 * 3600, aOrder.orderId]);
+  assert.equal((await start(bCookie, { planId: seat.planKey })).status, 409, 'an invoice the provider still accepts holds its seat past the card-form TTL');
+  // Once the provider has given up on it, both are free.
+  await tq('UPDATE checkout_attempts SET expires_at = ? WHERE session_id = ?', [nowSec() - 1, aOrder.orderId]);
+  const bFree = await start(bCookie, { planId: seat.planKey, discountCode: 'NPONE' });
+  assert.equal(bFree.status, 200, await bFree.clone().text());
+  const bOrder = await bFree.json();
+
+  // The pay screen polls the order row before the provider. With no payment
+  // id attached it waits — and once the IPN has marked the order completed it
+  // says paid, whether or not the id ever got attached.
+  const poll = async (order, cookie) => (await fetch(`${appUrl}/api/checkout/crypto?store=vip-signals&order=${order}`, { headers: { cookie } })).json();
+  const bRef = (await rowOf(bOrder.orderId)).provider_ref;
+  await tq('UPDATE checkout_attempts SET provider_ref = NULL WHERE session_id = ?', [bOrder.orderId]);
+  assert.equal((await poll(bOrder.orderId, bCookie)).state, 'pending');
+  const bPayment = nowpayments.payments.get(bRef);
+  bPayment.payment_status = 'finished';
+  bPayment.actually_paid = bPayment.pay_amount;
+  bPayment.actually_paid_at_fiat = bPayment.price_amount;
+  assert.equal((await deliverNow({ payment_id: bRef, payment_status: 'finished', order_id: bOrder.orderId })).status, 200);
+  await waitFor("B's crypto grant to land", async () => (await subRow('nowpayments', bRef)) !== null);
+  assert.equal((await rowOf(bOrder.orderId)).status, 'completed');
+  const paid = await poll(bOrder.orderId, bCookie);
+  assert.deepEqual([paid.status, paid.state], ['finished', 'paid'], 'a settled order never polls as waiting');
+  assert.equal((await poll(bOrder.orderId, aCookie)).state, undefined, "still nobody else's to read");
+
+  // The network minimum is asked for the pair the payment used: the buyer's
+  // coin into the seller's payout coin, never the coin into itself.
+  const tiny = JSON.parse(await (await post('/api/onboard', { step: 'product', storeId, name: 'Tiny', priceUsd: 0.75, lifetime: true })).text()).plan;
+  assert.equal((await post('/api/onboard', { step: 'role', storeId, planKey: tiny.planKey, roleId: R2_VIP })).status, 200);
+  const under = await start(aCookie, { planId: tiny.planKey, payCurrency: 'btc' });
+  assert.equal(under.status, 409);
+  assert.match((await under.json()).error, /network minimum of about 0\.004 BTC/);
+  assert.deepEqual(nowpayments.minAmount.at(-1), { from: 'btc', to: 'sol' }, 'the minimum quoted is the one that refused the order');
+  {
+    const { rows } = await tq('SELECT * FROM checkout_attempts WHERE discord_id = ? AND plan_id = ?', [A, tiny.planKey]);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].provider_ref, null);
+    // NOT NULL first: a released row must carry a real, passed expiry —
+    // `null <= nowSec()` is true in JavaScript, so the bare comparison also
+    // passed for a row that was never released and went on holding its seat.
+    assert.ok(rows[0].expires_at !== null && rows[0].expires_at !== undefined && asNum(rows[0].expires_at) <= nowSec(),
+      'an attempt the provider refused holds nothing');
+  }
+
+  // A buyer gets a few live addresses, not a loop's worth: each one holds a
+  // seat and a discount use until the provider gives up on it.
+  const loop = JSON.parse(await (await post('/api/onboard', { step: 'product', storeId, name: 'Crypto Loop', priceUsd: 20, lifetime: true })).text()).plan;
+  assert.equal((await post('/api/onboard', { step: 'role', storeId, planKey: loop.planKey, roleId: R2_VIP })).status, 200);
+  const minted = nowpayments.created.length;
+  const cOrders = [];
+  for (let i = 0; i < 3; i += 1) {
+    const r = await start(cCookie, { planId: loop.planKey });
+    assert.equal(r.status, 200, await r.clone().text());
+    cOrders.push((await r.json()).orderId);
+  }
+  const fourth = await start(cCookie, { planId: loop.planKey });
+  assert.equal(fourth.status, 429, await fourth.text());
+  assert.equal(nowpayments.created.length, minted + 3, 'the provider was never asked for the fourth');
+  assert.equal((await start(bCookie, { planId: loop.planKey })).status, 200, "one buyer's cap is not another's");
+  await tq('UPDATE checkout_attempts SET expires_at = ? WHERE session_id = ?', [nowSec() - 1, cOrders[0]]);
+  assert.equal((await start(cCookie, { planId: loop.planKey })).status, 200, 'an expired invoice no longer counts');
+
+  // And the cap holds when the clicks are in flight TOGETHER. Counted before
+  // the row was written, six parallel starts each read "none open yet" and
+  // each got an address — six live invoices, six held seats, from one buyer.
+  const D = '529000000000000030';
+  discord.members.set(D, new Set());
+  const dCookie = await signInAs('code_np_d', D, 'np_d');
+  const burstFrom = nowpayments.created.length;
+  // The provider takes its time, which is what made the old check-then-create
+  // window wide enough to drive a lorry through.
+  nowpayments.delayCreateMs = 150;
+  try {
+    const burst = await Promise.all([...Array(6)].map(() => start(dCookie, { planId: loop.planKey })));
+    assert.deepEqual(burst.map((r) => r.status).sort(), [200, 200, 200, 429, 429, 429], 'three invoices and three refusals, not six invoices');
+    assert.equal(nowpayments.created.length, burstFrom + 3, 'the provider was asked exactly three times');
+  } finally {
+    nowpayments.delayCreateMs = 0;
+  }
+  // Cleanup: park the products.
+  for (const key of [seat.planKey, tiny.planKey, loop.planKey]) {
+    assert.equal((await post('/api/onboard', { step: 'product-update', storeId, planKey: key, active: false })).status, 200);
+  }
+});
+
+test('a one-seat product is sold once when two buyers click Pay in the same instant, on either rail', async () => {
+  // The purchase limit used to be checked and then written on either side of
+  // a call to the payment provider: both buyers passed the check, both waited
+  // on Stripe or NOWPayments, and both were handed a checkout for the last
+  // seat. The card rail has no settlement-time re-check to catch it either —
+  // whoever paid, paid — so a one-seat product delivered twice. The seat is
+  // taken by the INSERT that records the attempt, so only one of them gets it.
+  const post = (path, body, cookie = npCookie) =>
+    fetch(`${appUrl}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ store: 'vip-signals', ...body }) });
+  const owned = await (await fetch(`${appUrl}/api/admin/payments`, { headers: { cookie: npCookie } })).json();
+  const storeId = owned.stores.find((s) => s.slug === 'vip-signals').id;
+  const seat = JSON.parse(await (await post('/api/onboard', { step: 'product', storeId, name: 'Single Seat', priceUsd: 50, lifetime: true })).text()).plan;
+  assert.equal((await post('/api/onboard', { step: 'role', storeId, planKey: seat.planKey, roleId: R2_VIP })).status, 200);
+  assert.equal((await post('/api/onboard', { step: 'product-update', storeId, planKey: seat.planKey, purchaseLimit: 1 })).status, 200);
+  const buyers = ['529100000000000031', '529200000000000032', '529300000000000033', '529400000000000034'];
+  for (const u of buyers) discord.members.set(u, new Set());
+  const [w, x, y, z] = await Promise.all(buyers.map((u, i) => signInAs(`code_seat_${i}`, u, `seat_${i}`)));
+  const card = (cookie) => post('/api/checkout/stripe', { planId: seat.planKey }, cookie);
+  const crypto_ = (cookie) => post('/api/checkout/crypto', { planId: seat.planKey, payCurrency: 'sol' }, cookie);
+  const started = async () => (await tq("SELECT discord_id FROM checkout_attempts WHERE plan_id = ? AND status = 'started'", [seat.planKey])).rows;
+
+  // The window is the provider's answer, so the mocks take their time here:
+  // without it the two requests do not really overlap and the scenario proves
+  // nothing about the ordering it exists to pin.
+  stripe.delayCheckoutSessionsMs = 200;
+  nowpayments.delayCreateMs = 200;
+  try {
+    const mixed = await Promise.all([card(w), crypto_(x)]);
+    assert.deepEqual(mixed.map((r) => r.status).sort(), [200, 409], 'one card and one crypto checkout for one seat: exactly one of them');
+    assert.equal((await started()).length, 1, 'and exactly one buyer is holding it');
+    await tq('DELETE FROM checkout_attempts WHERE plan_id = ?', [seat.planKey]);
+
+    const twoCards = await Promise.all([card(y), card(z)]);
+    assert.deepEqual(twoCards.map((r) => r.status).sort(), [200, 409], 'two card buyers in the same instant: exactly one of them');
+    assert.equal((await started()).length, 1, 'one seat, one reservation');
+    // The reservation is a real attempt row under Stripe's own session id, not
+    // a placeholder left behind: the completion webhook matches on that id.
+    assert.match((await tq('SELECT session_id FROM checkout_attempts WHERE plan_id = ? ORDER BY id DESC', [seat.planKey])).rows[0].session_id, /^cs_/);
+  } finally {
+    stripe.delayCheckoutSessionsMs = 0;
+    nowpayments.delayCreateMs = 0;
+  }
+  assert.equal((await post('/api/onboard', { step: 'product-update', storeId, planKey: seat.planKey, active: false })).status, 200);
+});
+
+test('an option of a switched-off product is not for sale on either rail', async () => {
+  const post = (path, body, cookie = npCookie) =>
+    fetch(`${appUrl}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ store: 'vip-signals', ...body }) });
+  const owned = await (await fetch(`${appUrl}/api/admin/payments`, { headers: { cookie: npCookie } })).json();
+  const storeId = owned.stores.find((s) => s.slug === 'vip-signals').id;
+  const parent = JSON.parse(await (await post('/api/onboard', { step: 'product', storeId, name: 'Cohort', priceUsd: 300, lifetime: true })).text()).plan;
+  assert.equal((await post('/api/onboard', { step: 'role', storeId, planKey: parent.planKey, roleId: R2_VIP })).status, 200);
+  const option = JSON.parse(await (await post('/api/onboard', { step: 'variant', storeId, planKey: parent.planKey, label: 'Monthly', priceUsd: 30, lifetime: false })).text()).plan;
+  const buyer = await signInAs('code_np_opt', '528800000000000028', 'np_opt');
+  discord.members.set('528800000000000028', new Set());
+  assert.equal((await post('/api/checkout/crypto', { planId: option.planKey, payCurrency: 'sol' }, buyer)).status, 200, 'the option sells while its product is on');
+  // The seller switches the PRODUCT off. The storefront hides the option;
+  // its own planId, from a cached link, must be just as dead at the API.
+  assert.equal((await post('/api/onboard', { step: 'product-update', storeId, planKey: parent.planKey, active: false })).status, 200);
+  const viaCrypto = await post('/api/checkout/crypto', { planId: option.planKey, payCurrency: 'sol' }, buyer);
+  const viaCryptoBody = await viaCrypto.text();
+  assert.equal(viaCrypto.status, 409, viaCryptoBody);
+  assert.match(viaCryptoBody, /not for sale/);
+  const viaCard = await post('/api/checkout/stripe', { planId: option.planKey }, buyer);
+  const viaCardBody = await viaCard.text();
+  assert.equal(viaCard.status, 409, viaCardBody);
+  assert.match(viaCardBody, /not for sale/);
+});
+
+test('the discount preview budgets misses, so it cannot be walked as an oracle', async () => {
+  const plan = (await (await fetch(`${appUrl}/api/plans?store=vip-signals`)).json()).plans.find((p) => !p.variantOf);
+  const cookie = await signInAs('code_np_guess', '529900000000000029', 'np_guess');
+  const ask = (code, headers = {}, store = 'vip-signals') => fetch(`${appUrl}/api/discount?store=${store}&code=${code}&plan=${store === 'vip-signals' ? plan.id : 'vip-access'}`, { headers });
+  assert.equal((await ask('LAUNCH20', { cookie })).status, 200, 'a real code previews');
+  for (let i = 0; i < 8; i += 1) {
+    assert.equal((await ask(`GUESS${i}`, { cookie })).status, 404);
+  }
+  assert.equal((await ask('GUESS9', { cookie })).status, 429, 'the ninth miss in the window is refused');
+  assert.equal((await ask('LAUNCH20', { cookie })).status, 429, 'and so is a hit — the throttle must not be the oracle');
+  assert.equal((await ask('LAUNCH20')).status, 200, "another asker's budget is their own");
+
+  // Checkout answers the same question — hit or miss, synchronously, to any
+  // Discord login — so budgeting only the preview moved the oracle one
+  // endpoint over instead of closing it. One budget, shared.
+  const guesser = await signInAs('code_np_guess2', '529900000000000030', 'np_guess2');
+  discord.members.set('529900000000000030', new Set());
+  const buy = (discountCode) => fetch(`${appUrl}/api/checkout/stripe`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', cookie: guesser },
+    body: JSON.stringify({ store: 'vip-signals', planId: plan.id, discountCode }),
+  });
+  for (let i = 0; i < 8; i += 1) {
+    assert.equal((await buy(`CGUESS${i}`)).status, 400, `checkout miss ${i}`);
+  }
+  assert.equal((await buy('LAUNCH20')).status, 429, 'past the budget checkout refuses alike — a hit must not be the tell');
+  assert.equal((await ask('LAUNCH20', { cookie: guesser })).status, 429, 'one budget for both endpoints, not one each');
+
+  // The store-wide cap is shared by every visitor of that store, so refusing
+  // on it let ~38 guessers switch the Apply button off for a store's real
+  // buyers, renewably. It may refuse guessing; it may not refuse a real code.
+  for (let i = 0; i < 300; i += 1) {
+    await ask(`FLOOD${i}`, { 'x-forwarded-for': `10.${Math.floor(i / 250)}.${i % 250}.7` });
+  }
+  assert.equal((await ask('LAUNCH20', { 'x-forwarded-for': '10.9.9.9' })).status, 200, 'a real code still previews once a store is over its cap');
+  assert.equal((await ask('NOPE', { 'x-forwarded-for': '10.9.9.9' })).status, 429, 'guessing past the store cap is refused');
+
+  // The budget is in the database, not in the process. This ships as
+  // serverless functions: a module-level Map is a fresh eight answers on
+  // every instance and every cold start, which is no budget at all.
+  assert.ok(Number((await tq('SELECT COUNT(*) AS n FROM discount_misses WHERE asker = ?', [`u:${'529900000000000029'}`])).rows[0].n) >= 8,
+    "the asker's misses are counted in shared storage");
+  // A store that is not being walked serves everybody normally, cap or no cap:
+  // the count is per store, so one store's flood is not another's outage.
+  assert.equal((await ask('NOPE', { 'x-forwarded-for': '198.51.100.4' }, 'demo')).status, 404,
+    "a quiet store still answers a stranger's miss");
+});
+
+
+test('dashboard money: a crypto pass is not recurring revenue, and a deleted product does not turn a yearly member into a monthly one', async () => {
+  // Two facts the Overview MRR card reads straight off this endpoint, and
+  // gets wrong in opposite directions when either is missing.
+  const ownerCookie = await signInAs('code_u7_mrr', '507700000000000007', 'vip_owner');
+  const rowsFor = async (extra = '') =>
+    (await (await fetch(`${appUrl}/api/admin/payments?store=vip-signals${extra}`, { headers: { cookie: ownerCookie } })).json());
+
+  // 1. RENEWS. MRR is revenue that bills again. Stripe runs every term plan
+  //    in subscription mode, so a card row does; a crypto purchase is a fixed
+  //    term that simply ends — /account tells the buyer "a one-time payment,
+  //    nothing renews" — and a manual grant was never charged at all. Counted
+  //    as MRR, a store selling mostly crypto passes shows a figure that falls
+  //    to zero on its own at term end.
+  const seen = await rowsFor();
+  assert.ok(seen.payments.length, 'the store has sales to judge');
+  // The platform view, for the rails this one store has not sold on.
+  const adminCookie = await signInAs('code_u1', U1, 'trader_one');
+  const every = await (await fetch(`${appUrl}/api/admin/payments`, { headers: { cookie: adminCookie } })).json();
+  for (const p of [...seen.payments, ...every.payments]) {
+    assert.equal(typeof p.renews, 'boolean', `every row says whether it bills again (${p.planId}/${p.provider})`);
+    assert.equal(p.renews, p.provider === 'stripe' && !p.lifetime, `${p.provider}${p.lifetime ? ' lifetime' : ''} row: renews`);
+  }
+  const fixedTerm = every.payments.find((p) => p.provider !== 'stripe' && p.provider !== 'manual' && !p.lifetime);
+  assert.ok(fixedTerm, 'a fixed-term crypto pass is on the books to judge');
+  assert.equal(fixedTerm.renews, false, 'a crypto pass is bought once and ends — never recurring revenue');
+  assert.ok(every.payments.some((p) => p.renews), 'while card subscriptions still count');
+
+  // 2. THE TERM SURVIVES THE PRODUCT. deleteStorePlan is a hard DELETE, and
+  //    product-delete refuses while anyone LIVE holds the product — but a
+  //    member whose card failed and whose grace has run out is not live, so
+  //    the delete goes through, and Stripe's own retry brings them back
+  //    afterwards (customer.subscription.updated reactivates the row without
+  //    consulting the catalog). The plan row is gone; the member is still
+  //    billed $600 a YEAR. Reading the term off the catalog left no term at
+  //    all there, and no term reads as monthly: $600 of MRR where there is $50.
+  const storeId = seen.stores.find((s) => s.slug === 'vip-signals').id;
+  const post = (path, body) =>
+    fetch(`${appUrl}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', cookie: ownerCookie }, body: JSON.stringify({ store: 'vip-signals', ...body }) });
+  const made = await (await post('/api/onboard', { step: 'product', storeId, name: 'Desk Yearly', description: 'A year at the desk.', priceUsd: 600, lifetime: false, durationDays: 365 })).json();
+  const yearlyKey = made.plan?.planKey;
+  assert.ok(yearlyKey, `the yearly product must be created: ${JSON.stringify(made)}`);
+
+  const YEARLY_BUYER = '523300000000000023';
+  const SUB = 'sub_desk_yearly';
+  discord.members.set(YEARLY_BUYER, new Set());
+  stripe.periodEnds[SUB] = nowSec() + 365 * 86400;
+  const signed = (evt) => deliverStripe(evt, { path: `/webhooks/stripe/${storeId}`, header: signStripe(JSON.stringify(evt), nowSec(), AUTO_ENDPOINT_SECRET) });
+  assert.equal(
+    (await signed({
+      id: 'evt_desk_yearly',
+      type: 'checkout.session.completed',
+      data: { object: { id: 'cs_desk_yearly', mode: 'subscription', subscription: SUB, payment_status: 'paid', amount_total: 60000, client_reference_id: YEARLY_BUYER, metadata: { plan_id: yearlyKey, discord_id: YEARLY_BUYER, store_id: String(storeId) } } },
+    })).status,
+    200,
+  );
+  const mine = async () => (await rowsFor()).payments.find((p) => p.discordId === YEARLY_BUYER);
+  const sold = await mine();
+  assert.ok(sold, 'the yearly sale landed');
+  assert.equal(sold.durationDays, 365, 'the sale goes on the books as a yearly');
+  assert.equal(sold.renews, true, 'a card subscription bills again');
+
+  // Their card fails and the grace window runs out. Only the clock is faked.
+  await tq("UPDATE subscriptions SET status = 'past_due', grace_until = ? WHERE provider = 'stripe' AND provider_ref = ?", [nowSec() - 60, SUB]);
+  // Nobody is live on the product now, so the seller may retire it.
+  const gone = await post('/api/onboard', { step: 'product-delete', storeId, planKey: yearlyKey });
+  assert.equal(gone.status, 200, await gone.text());
+  // Stripe recovers the payment: active again, on a plan row that is gone.
+  assert.equal(
+    (await signed({
+      id: 'evt_desk_yearly_up',
+      type: 'customer.subscription.updated',
+      data: { object: { id: SUB, status: 'active', items: { data: [{ current_period_end: nowSec() + 365 * 86400 }] } } },
+    })).status,
+    200,
+  );
+
+  const after = await mine();
+  assert.equal(after.entitled, true, 'the member is entitled again');
+  assert.equal(after.planName, yearlyKey, 'and the catalog really has nothing left to name them by');
+  assert.equal(after.durationDays, 365, 'the term the sale was made on outlives the product row');
+  assert.equal(after.amountUsd, sold.amountUsd, 'and so does what they paid');
+});
+
+test('crypto: buyer-facing copy never promises a renewal or a cancellation the rail cannot do', async () => {
+  // A crypto grant is a fixed term (periodEnd null → plan.durationDays) that
+  // no one can cancel (/api/subscription refuses non-stripe refs) and that
+  // never renews. The storefront and /account are plain browser scripts, so
+  // the two copy expressions are lifted out of the source and evaluated
+  // rather than matched as strings: a copy edit is fine, a promise is not.
+  const app = fs.readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const assureExpr = app.match(/assure\.textContent = ([\s\S]*?);\n\s*area\.append\(assure\)/)?.[1];
+  assert.ok(assureExpr, 'the note under the pay button must still be a single expression');
+  const assure = new Function('plan', 'crypto', 'termDays', `return (${assureExpr});`);
+  // The plan object is the one /api/plans actually serves, not a hand-built
+  // stand-in: the note can only name the term if the payload carries it, and
+  // a projection that drops durationDays leaves every buyer reading "a fixed
+  // term" however carefully the sentence is written.
+  const served = (await (await fetch(`${appUrl}/api/plans?store=tradeleaks`)).json()).plans;
+  const monthly = served.find((p) => !p.lifetime);
+  assert.ok(monthly, 'the storefront must still sell a term product');
+  assert.ok(Number(monthly.durationDays) > 0, '/api/plans has to carry the term length — the pay screen has nowhere else to read it');
+  assert.match(assure(monthly, false, Number(monthly.durationDays)), /cancel anytime/i, 'a card membership really can be cancelled from /account');
+  const cryptoNote = assure(monthly, true, Number(monthly.durationDays));
+  assert.doesNotMatch(cryptoNote, /cancel/i, 'nothing on a crypto term can be cancelled — do not say it');
+  assert.match(cryptoNote, /nothing renews|does not renew|no renewal/i, 'the crypto note must say the term does not renew');
+  assert.match(cryptoNote, new RegExp(`\\b${monthly.durationDays} days\\b`), 'the fixed term is the one fact the buyer needs');
+  const lifetimePlan = served.find((p) => p.lifetime);
+  if (lifetimePlan) assert.equal(lifetimePlan.durationDays, null, 'a lifetime product has no term to advertise');
+  assert.doesNotMatch(assure({ lifetime: true, durationDays: null }, true, NaN), /cancel|renews/i);
+
+  const account = fs.readFileSync(new URL('../public/account.js', import.meta.url), 'utf8');
+  const expiryExpr = account.match(/const expiry = ([\s\S]*?);\n\s*const roles/)?.[1];
+  assert.ok(expiryExpr, '/account must still describe the term in one expression');
+  const expiry = new Function('sub', 'fmtDate', `return (${expiryExpr});`);
+  const fmt = (t) => `<${t}>`;
+  const base = { lifetime: false, cancelsAt: null, entitled: true, currentPeriodEnd: 1_800_000_000, graceUntil: null };
+  assert.match(expiry({ ...base, provider: 'stripe' }, fmt), /^Renews <1800000000>/);
+  for (const provider of ['nowpayments', 'coinbase']) {
+    const text = expiry({ ...base, provider }, fmt);
+    assert.doesNotMatch(text, /renews <|will renew|auto-renew(?!s\b)/i, `${provider}: nothing will charge again, so it must not say Renews`);
+    assert.match(text, /ends <1800000000>/i, `${provider}: the buyer is told the date the role goes away`);
+  }
+  // A membership the owner granted by hand was never bought. It ends like a
+  // crypto term, but calling it a payment and telling the member to buy again
+  // invoices them for a gift — so "one-time payment"/"buy again" is reserved
+  // for the rails that really took money, and anything else stays neutral.
+  for (const provider of ['manual', undefined]) {
+    const text = expiry({ ...base, provider }, fmt);
+    assert.match(text, /ends <1800000000>/i, `${String(provider)}: the member is still told when access ends`);
+    assert.doesNotMatch(text, /payment|buy again|renews </i, `${String(provider)}: a comped membership was not paid for`);
+  }
+});
+
+test('crypto: the two coin pickers survive answers the deposit list does not describe', async () => {
+  // Both pickers are browser code this suite does not run, so the two pure
+  // decisions behind them are lifted out of the files and executed as written.
+
+  // Seller side. /merchant/coins is the DEPOSIT list; payouts are gated by
+  // payout/validate-address instead, and the suite above proves a store can
+  // legitimately be saved on LTC while LTC is absent from that list. A
+  // <select> cannot hold a value it has no option for, so a picker built from
+  // the deposit list alone would open on "Choose a coin…", show generic copy
+  // for an address that is in fact valid, and refuse to save until the seller
+  // moved their payouts to another network.
+  const dashSrc = fs.readFileSync(new URL('../public/dashboard.js', import.meta.url), 'utf8');
+  const payoutCoinsSrc = dashSrc.match(/function payoutCoins\(coins, current\) \{[\s\S]*?\n\}/)?.[0];
+  assert.ok(payoutCoinsSrc, 'dashboard.js must still decide the payout options in one place');
+  const payoutCoins = new Function(`${payoutCoinsSrc}\n return payoutCoins;`)();
+  const deposit = ['sol', 'usdtsol', 'btc', 'eth', 'xmr'];
+  assert.ok(payoutCoins(deposit, 'ltc').includes('ltc'), 'the chain on file is always offered — otherwise the card cannot round-trip it');
+  assert.equal(payoutCoins(deposit, 'ltc')[0], 'ltc', 'and it is the one already selected, so Save works untouched');
+  assert.deepEqual(payoutCoins(deposit, 'sol'), deposit, 'a chain already in the list is not duplicated');
+  assert.deepEqual(payoutCoins(deposit, ''), deposit, 'a store with no chain yet just gets the starting set');
+
+  // Buyer side. `ready:false` and an empty list are the same fact — nothing
+  // here can be paid with — and remembering either parks an empty grid under
+  // a live Crypto tile for the life of the page, even after the seller
+  // finishes their setup a minute later. null is "ask again".
+  const appSrc = fs.readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const fromAnswerSrc = appSrc.match(/const coinsFromAnswer = \(data\) => \{[\s\S]*?\n\};/)?.[0];
+  assert.ok(fromAnswerSrc, 'app.js must still decide what to keep from a ?coins=1 answer in one place');
+  const coinsFromAnswer = new Function(`${fromAnswerSrc}\n return coinsFromAnswer;`)();
+  assert.equal(coinsFromAnswer({ ready: false, coins: [] }), null, 'a not-ready rail is never cached as "no coins"');
+  assert.equal(coinsFromAnswer({ ready: true, coins: [] }), null, 'nor is a ready answer with nothing in it');
+  assert.equal(coinsFromAnswer({}), null);
+  assert.deepEqual(coinsFromAnswer({ ready: true, coins: ['sol', 'btc'] }), ['sol', 'btc'], 'a real list is kept as it arrived');
+});
+
+test('crypto: an IPN the runtime already parsed is still verified, not answered with a blanket 400', async () => {
+  // The NOWPayments signature is over a sorted re-serialisation of the JSON,
+  // not the wire bytes — so unlike Stripe's, a body the platform pre-parsed
+  // onto req.body is still verifiable. A runtime change that starts doing
+  // that must not turn into 400 on every delivery (and every sale lost).
+  const { Readable } = await import('node:stream');
+  const { config: appConfig } = await import('../src/config.js');
+  const { default: npWebhook } = await import('../api/webhooks/nowpayments.js');
+  const makeRes = () => {
+    const res = { statusCode: 0, body: '', headersSent: false };
+    res.writeHead = (code) => ((res.statusCode = code), (res.headersSent = true), res);
+    res.end = (chunk) => ((res.body += chunk ?? ''), res);
+    return res;
+  };
+  const makeReq = (sig) => {
+    const req = new Readable({ read() {} });
+    req.method = 'POST';
+    req.url = '/api/webhooks/nowpayments';
+    req.headers = { 'x-nowpayments-sig': sig };
+    return req;
+  };
+  // The handler runs in THIS process, whose config never saw the rail's
+  // credentials; lend it the suite's, then hand them back.
+  const saved = { apiKey: appConfig.nowpayments.apiKey, ipnSecret: appConfig.nowpayments.ipnSecret, released: process.env.NOWPAYMENTS_RELEASED };
+  appConfig.nowpayments.apiKey = NOW_KEY;
+  appConfig.nowpayments.ipnSecret = NOW_IPN_SECRET;
+  process.env.NOWPAYMENTS_RELEASED = '1';
+  try {
+    // No payment_id, so a delivery whose signature verifies stops at the
+    // payload check — which is only reachable if the pre-parsed object was
+    // the thing signed and verified.
+    const payload = { payment_status: 'finished', order_id: 'np_preparsed' };
+    const reqA = makeReq(signNow(payload));
+    Object.defineProperty(reqA, 'body', { value: payload, configurable: true });
+    const resA = makeRes();
+    await npWebhook(reqA, resA);
+    assert.deepEqual({ status: resA.statusCode, body: resA.body }, { status: 400, body: 'invalid payload' });
+
+    const reqB = makeReq(signNow(payload, 'the-wrong-secret'));
+    Object.defineProperty(reqB, 'body', { value: payload, configurable: true });
+    const resB = makeRes();
+    await npWebhook(reqB, resB);
+    assert.deepEqual({ status: resB.statusCode, body: resB.body }, { status: 400, body: 'invalid signature' }, 'a pre-parsed body is verified, never trusted');
+
+    // Vercel's LAZY getter: the stream is read and the getter never touched.
+    const reqC = makeReq(signNow(payload));
+    let getterTouched = false;
+    Object.defineProperty(reqC, 'body', { get() { getterTouched = true; return {}; }, configurable: true });
+    reqC.push(JSON.stringify(payload));
+    reqC.push(null);
+    const resC = makeRes();
+    await npWebhook(reqC, resC);
+    assert.deepEqual({ status: resC.statusCode, body: resC.body }, { status: 400, body: 'invalid payload' });
+    assert.equal(getterTouched, false, 'probing req.body would consume the stream');
+  } finally {
+    appConfig.nowpayments.apiKey = saved.apiKey;
+    appConfig.nowpayments.ipnSecret = saved.ipnSecret;
+    if (saved.released === undefined) delete process.env.NOWPAYMENTS_RELEASED;
+    else process.env.NOWPAYMENTS_RELEASED = saved.released;
+  }
+});
+
+// A crypto checkout for the vip-signals buyer: the order row and the mock
+// payment it points at, so a scenario can walk the payment through statuses.
+async function npCheckout(planId, cookie = npBuyerCookie) {
+  const res = await fetch(`${appUrl}/api/checkout/crypto`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', cookie },
+    body: JSON.stringify({ store: 'vip-signals', planId, payCurrency: 'sol' }),
+  });
+  const body = await res.text();
+  assert.equal(res.status, 200, body);
+  const order = JSON.parse(body);
+  const { rows } = await tq('SELECT provider_ref FROM checkout_attempts WHERE session_id = ?', [order.orderId]);
+  return { order, payment: nowpayments.payments.get(rows[0].provider_ref) };
+}
+const npView = async (orderId, cookie = npBuyerCookie) =>
+  (await fetch(`${appUrl}/api/checkout/crypto?store=vip-signals&order=${orderId}`, { headers: { cookie } })).json();
+const npAttemptStatus = async (orderId) =>
+  (await tq('SELECT status FROM checkout_attempts WHERE session_id = ?', [orderId])).rows[0].status;
+
+test('crypto: no coin figure without evidence, and a status nobody knows is "checking", never "confirming"', async () => {
+  const { describeStatus, paidInRequestedCoin, settledFiat } = await import('../src/lib/nowpayments.js');
+  // Wrong-asset auto-processing is ON, so a deposit with no fiat valuation
+  // attached could be any coin. actually_paid_at_fiat is the only evidence of
+  // what turned up, and ONE rule follows from its absence: no coin figure and
+  // no money figure either. The shortfall used to be quoted in dollars from
+  // (actually_paid / pay_amount) × price — the same wrong-asset assumption
+  // the coin figure is withheld for, dressed up as a precise number.
+  const bare = { payment_status: 'partially_paid', pay_currency: 'sol', pay_amount: 0.5, actually_paid: 0.35, price_amount: 49.99, price_currency: 'usd' };
+  assert.equal(paidInRequestedCoin(bare), false, 'no actually_paid_at_fiat is no evidence, not proof of the requested coin');
+  assert.equal(settledFiat(bare), null, 'and no evidence of what it was worth either');
+  assert.doesNotMatch(describeStatus(bare, { currency: 'usd' }).message, /SOL/);
+  assert.doesNotMatch(describeStatus(bare, { currency: 'usd' }).message, /[$\d]/, 'no figure at all, in any unit, when nothing here knows one');
+  assert.match(describeStatus(bare, { currency: 'usd' }).message, /same address/, 'they can still top it up');
+  assert.match(describeStatus({ ...bare, actually_paid_at_fiat: 34.99 }, { currency: 'usd' }).message, /\$15\.00/, 'a reported fiat value is quoted');
+  assert.equal(paidInRequestedCoin({ ...bare, actually_paid_at_fiat: 34.99 }), true, 'a fiat value that agrees with the coin maths is the evidence');
+
+  for (const status of ['something_new', '', undefined]) {
+    const d = describeStatus({ payment_status: status });
+    assert.equal(d.state, 'pending', `status ${JSON.stringify(status)} keeps the screen polling`);
+    assert.match(d.message, /Checking on this payment/);
+    assert.doesNotMatch(d.message, /Confirming/, 'nothing here knows a confirmation is under way');
+  }
+
+  // The same status through the webhook: nothing granted, and a log line an
+  // operator can find — the buyer's screen says "checking", so this is the
+  // only trace.
+  const plans = await (await fetch(`${appUrl}/api/plans?store=vip-signals`)).json();
+  const { order, payment } = await npCheckout(plans.plans[0].id);
+  payment.payment_status = 'something_new';
+  assert.equal((await deliverNow({ payment_id: payment.payment_id, payment_status: 'something_new', order_id: order.orderId })).status, 200);
+  assert.equal(await subRow('nowpayments', payment.payment_id), null);
+  await waitFor('the unrecognised status to be logged', () =>
+    appLog.join('').includes(`nowpayments ${payment.payment_id} (order ${order.orderId}) has unrecognised status "something_new"`));
+  const view = await npView(order.orderId);
+  assert.equal(view.state, 'pending');
+  assert.match(view.message, /Checking on this payment/);
+});
+
+test('crypto: money that lands for a product that cannot be delivered is never a completed sale', async () => {
+  const post = (path, body, cookie = npCookie) =>
+    fetch(`${appUrl}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ store: 'vip-signals', ...body }) });
+  const owned = await (await fetch(`${appUrl}/api/admin/payments`, { headers: { cookie: npCookie } })).json();
+  const storeId = owned.stores.find((s) => s.slug === 'vip-signals').id;
+  const product = async (name) => {
+    const plan = JSON.parse(await (await post('/api/onboard', { step: 'product', storeId, name, priceUsd: 20, lifetime: true })).text()).plan;
+    assert.equal((await post('/api/onboard', { step: 'role', storeId, planKey: plan.planKey, roleId: R2_VIP })).status, 200);
+    return plan;
+  };
+  const finish = async ({ order, payment }) => {
+    payment.payment_status = 'finished';
+    payment.actually_paid = payment.pay_amount;
+    payment.actually_paid_at_fiat = payment.price_amount;
+    assert.equal((await deliverNow({ payment_id: payment.payment_id, payment_status: 'finished', order_id: order.orderId })).status, 200);
+  };
+  const undelivered = async ({ order, payment }, why, pings0, cookie = npBuyerCookie) => {
+    assert.equal(await subRow('nowpayments', payment.payment_id), null, 'nothing may be granted');
+    assert.equal(await npAttemptStatus(order.orderId), 'undelivered', '"completed" means the buyer got what they paid for; this order is closed, not open');
+    assert.equal(discord.channelPosts.length, pings0 + 1, 'exactly one post: the alert, never a sale ping');
+    const embed = discord.channelPosts.at(-1).body.embeds[0];
+    assert.match(embed.title, /nothing was delivered/i);
+    assert.doesNotMatch(embed.title, /New Subscriber/);
+    assert.match(embed.description, why);
+    assert.match(embed.description, /SOL/, 'the seller is told which coin to refund');
+    // The buyer is not told "confirmed" and bounced to a receipt that will
+    // never fill: the money is in, the product is not.
+    const view = await npView(order.orderId, cookie);
+    assert.equal(view.state, 'pending', JSON.stringify(view));
+    assert.match(view.message, /checking on delivery/i);
+  };
+
+  // 1. Switched off while the invoice was open. The checkout-time answer is
+  //    stale, and the guard is asked again at settlement.
+  const dark = await product('Switched Off');
+  const a = await npCheckout(dark.planKey);
+  assert.equal((await post('/api/onboard', { step: 'product-update', storeId, planKey: dark.planKey, active: false })).status, 200);
+  let pings0 = discord.channelPosts.length;
+  await finish(a);
+  await undelivered(a, /not for sale/, pings0);
+
+  // 2. Deleted after the provider closed the invoice — the delete waits for
+  //    OPEN checkouts (an invoice holds the product for its whole life), but
+  //    coins sent to a closed invoice can still be credited, and then pay.
+  const ghost = await product('Ghost');
+  const g = await npCheckout(ghost.planKey);
+  await tq('UPDATE checkout_attempts SET created_at = created_at - 7200, expires_at = created_at - 3600 WHERE session_id = ?', [g.order.orderId]);
+  assert.equal((await post('/api/onboard', { step: 'product-delete', storeId, planKey: ghost.planKey })).status, 200);
+  pings0 = discord.channelPosts.length;
+  await finish(g);
+  await undelivered(g, /no longer in this store/, pings0);
+
+  // 3. One seat, two invoices. An open invoice reserves its seat at checkout,
+  //    so the second invoice can only exist if the cap arrived after it: the
+  //    seller limits the product to one seat while both are open. The first
+  //    to pay is granted…
+  const seat = await product('Last Seat');
+  const first = await npCheckout(seat.planKey);
+  const LATE = '532300000000000034'; // its own id: 5322…32 is the kicked-bot scenario's KB, whose live sub would re-grant the role on login
+  discord.members.set(LATE, new Set());
+  const lateCookie = await signInAs('code_late_seat', LATE, 'late_seat');
+  const second = await npCheckout(seat.planKey, lateCookie);
+  assert.equal((await post('/api/onboard', { step: 'product-update', storeId, planKey: seat.planKey, purchaseLimit: 1 })).status, 200);
+  pings0 = discord.channelPosts.length;
+  await finish(first);
+  await waitFor('the first seat to land', async () => (await subRow('nowpayments', first.payment.payment_id)) !== null);
+  assert.equal(await npAttemptStatus(first.order.orderId), 'completed');
+  assert.equal(discord.channelPosts.length, pings0 + 1);
+  assert.match(discord.channelPosts.at(-1).body.embeds[0].title, /New Subscriber/);
+  assert.equal((await npView(first.order.orderId)).state, 'paid', 'delivered, so the screen may say so');
+  // …and the second, paying after the seat is gone, is not.
+  pings0 = discord.channelPosts.length;
+  await finish(second);
+  await undelivered(second, /sold out/, pings0, lateCookie);
+  assert.ok(!memberRoles(LATE).has(R2_VIP), 'the role is the product, and it was not for sale');
+  assert.equal((await post('/api/onboard', { step: 'product-update', storeId, planKey: seat.planKey, purchaseLimit: null })).status, 200);
+
+  // 4. And the answer is given ONCE. Left open, this order was re-settled by
+  //    every IPN replay past the claim window and by every hourly cron for
+  //    the whole seven-day backfill window: the same red embed to the seller
+  //    each time (~168 of them), counted as a `recovered` sale each time, and
+  //    — the expensive part — granted the moment the block happened to clear,
+  //    which is after the seller has read "refund them from your wallet" and
+  //    done it. Closing the order is what stops all three.
+  pings0 = discord.channelPosts.length;
+  await tq("UPDATE webhook_events SET received_at = received_at - 900 WHERE event_id = ?", [`nowpayments:${a.payment.payment_id}:finished`]);
+  const replay = await deliverNow({ payment_id: a.payment.payment_id, payment_status: 'finished', order_id: a.order.orderId });
+  assert.deepEqual([replay.status, replay.body], [200, 'ok'], 'the money is settled and the order closed — nothing for the provider to retry');
+  assert.equal(discord.channelPosts.length, pings0, 'no second alert for the same undelivered payment');
+  await tq('UPDATE checkout_attempts SET created_at = created_at - 7200 WHERE session_id = ?', [a.order.orderId]);
+  for (const pass of [1, 2]) {
+    await tq('UPDATE webhook_events SET received_at = received_at - 3600 WHERE event_id = ?', [`nowpayments:${a.payment.payment_id}:finished`]);
+    const cron = JSON.parse((await hitCron()).body);
+    assert.equal(cron.cryptoBackfill?.recovered, 0, `pass ${pass}: an undelivered order is not a recovered sale`);
+    assert.equal(discord.channelPosts.length, pings0, `pass ${pass}: the cron re-alerts nobody`);
+  }
+  // The seller fixes the cause. The money still does not deliver itself —
+  // they were told to refund it, and undoing that is their call, from
+  // Members, not something an hourly job decides for them.
+  assert.equal((await post('/api/onboard', { step: 'product-update', storeId, planKey: dark.planKey, active: true })).status, 200);
+  await tq('UPDATE webhook_events SET received_at = received_at - 3600 WHERE event_id = ?', [`nowpayments:${a.payment.payment_id}:finished`]);
+  assert.equal(JSON.parse((await hitCron()).body).cryptoBackfill?.recovered, 0, 'a re-enabled product does not resurrect a refunded sale');
+  // Nor does a replayed IPN, which is the other way in: NOWPayments' delivery
+  // carries no timestamp, so a captured one can arrive at any point.
+  await tq('UPDATE webhook_events SET received_at = received_at - 3600 WHERE event_id = ?', [`nowpayments:${a.payment.payment_id}:finished`]);
+  const late = await deliverNow({ payment_id: a.payment.payment_id, payment_status: 'finished', order_id: a.order.orderId });
+  assert.deepEqual([late.status, late.body], [200, 'ok']);
+  assert.equal(await subRow('nowpayments', a.payment.payment_id), null);
+  assert.equal(await npAttemptStatus(a.order.orderId), 'undelivered');
+  assert.equal(discord.channelPosts.length, pings0);
+  assert.equal((await post('/api/onboard', { step: 'product-update', storeId, planKey: dark.planKey, active: false })).status, 200);
+});
+
+test('crypto: Discord failing to answer at settlement is a retry, never "they left — refund them"', async () => {
+  // The one guard that asks Discord anything: a role-gated product. At
+  // checkout, folding an error into "not a member" is right — nothing has
+  // been paid. At settlement the coins are already in the seller's wallet,
+  // and the alert says the sale is not allowed and to refund it, word for
+  // word what a real departure produces. A seller cannot tell those apart,
+  // and acting on the wrong one costs them the refund AND the sale, because
+  // the next cron delivers the role anyway.
+  const post = (path, body, cookie = npCookie) =>
+    fetch(`${appUrl}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ store: 'vip-signals', ...body }) });
+  const storeId = await npStoreId();
+  const plan = JSON.parse(await (await post('/api/onboard', { step: 'product', storeId, name: 'Gate Retry', priceUsd: 25, lifetime: true })).text()).plan;
+  assert.equal((await post('/api/onboard', { step: 'role', storeId, planKey: plan.planKey, roleId: R2_VIP })).status, 200);
+  assert.equal((await post('/api/onboard', { step: 'product-update', storeId, planKey: plan.planKey, requiredRoleId: R2_VIP })).status, 200);
+  const GB = '534400000000000035';
+  discord.members.set(GB, new Set());
+  // The gate role goes on AFTER the login: signing in reconciles, and a
+  // managed role nobody has bought yet is taken back off.
+  const gbCookie = await signInAs('code_gate_retry', GB, 'gate_retry');
+  discord.members.get(GB).add(R2_VIP);
+  const { order, payment } = await npCheckout(plan.planKey, gbCookie);
+  payment.payment_status = 'finished';
+  payment.actually_paid = payment.pay_amount;
+  payment.actually_paid_at_fiat = payment.price_amount;
+
+  const pings0 = discord.channelPosts.length;
+  discord.failMemberGetsFor.add(GB);
+  const down = await deliverNow({ payment_id: payment.payment_id, payment_status: 'finished', order_id: order.orderId });
+  assert.equal(down.status, 500, 'a delivery nothing could decide must come back, not be acknowledged');
+  assert.equal(discord.channelPosts.length, pings0, 'no alert: nobody knows yet whether this sale is allowed');
+  assert.equal(await npAttemptStatus(order.orderId), 'started', 'and the order stays open for the retry');
+  assert.deepEqual(await claimRows(`nowpayments:${payment.payment_id}:%`), [], 'the claim is released, so the retry is not answered "in progress"');
+
+  // Discord comes back; the provider's retry delivers the sale once.
+  discord.failMemberGetsFor.delete(GB);
+  const back = await deliverNow({ payment_id: payment.payment_id, payment_status: 'finished', order_id: order.orderId });
+  assert.deepEqual([back.status, back.body], [200, 'ok']);
+  assert.equal(await npAttemptStatus(order.orderId), 'completed');
+  assert.ok((await subRow('nowpayments', payment.payment_id)) !== null, 'the valid sale lands');
+  assert.equal(discord.channelPosts.length, pings0 + 1);
+  assert.match(discord.channelPosts.at(-1).body.embeds[0].title, /New Subscriber/);
+});
+
+test('crypto backfill: orders the provider never advances take their turn instead of holding the queue', async () => {
+  // The batch is capped at 20 and used to be the OLDEST open orders, every
+  // run. An underpayment stays `partially_paid` until it ages out, so twenty
+  // of them — common on-chain — pinned the batch for a week and the lost
+  // sale this backstop exists for was never looked at. Least-recently-asked
+  // ordering is what keeps the queue moving.
+  const storeId = await npStoreId();
+  const made = JSON.parse(await (await fetch(`${appUrl}/api/onboard`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', cookie: npCookie },
+    body: JSON.stringify({ store: 'vip-signals', step: 'product', storeId, name: 'Queue Order', priceUsd: 30, lifetime: true }),
+  })).text()).plan;
+  const plan = { id: made.planKey, priceUsd: 30 };
+  const SHORTY = '535500000000000036';
+  const LOST2 = '535500000000000037';
+  for (let i = 0; i < 20; i += 1) {
+    await npOpenOrder({ storeId, plan, uid: SHORTY, orderId: `np_${'e'.repeat(30)}${String(i).padStart(2, '0')}`, ref: `npid_short_${i}`, status: 'partially_paid', age: 10800 + i });
+  }
+  const O_LOST2 = `np_${'f'.repeat(32)}`;
+  await npOpenOrder({ storeId, plan, uid: LOST2, orderId: O_LOST2, ref: 'npid_lost2', status: 'finished', age: 7200 });
+  // Two runs: the first clears the twenty older short rows, the second must
+  // reach the newer finished one. Before, every run re-asked the same twenty.
+  let recovered = 0;
+  for (const _ of [1, 2]) recovered += JSON.parse((await hitCron()).body).cryptoBackfill?.recovered ?? 0;
+  assert.equal(recovered, 1, 'the lost sale is recovered within a run or two, not after the shorts age out');
+  assert.equal(await attemptStatus(O_LOST2), 'completed');
+  assert.ok((await subRow('nowpayments', 'npid_lost2')) !== null, 'the sale that was starved is delivered');
+  // The short rows are left open on purpose — the buyer can still top them
+  // up — but they no longer come first for ever.
+  assert.equal(await attemptStatus(`np_${'e'.repeat(30)}00`), 'started');
+  for (let i = 0; i < 20; i += 1) await tq("UPDATE checkout_attempts SET status = 'expired' WHERE session_id = ?", [`np_${'e'.repeat(30)}${String(i).padStart(2, '0')}`]);
+});
+
+// ── welcome cards: the doctor's arithmetic ───────────────────────────────────
+// Welcome cards are posted by scripts/presence.js, a gateway worker this suite
+// cannot reach: it needs a socket and a real bot token. What it CAN hold is the
+// part that decides whether the owner gets told the truth — the permission
+// arithmetic `npm run doctor:welcome` reports, which is pure, and the manifest
+// promise the worker image depends on.
+
+test('doctor:welcome computes channel permissions the way Discord does', async () => {
+  const { computePermissions, missingPermissions, membersIntentEnabled, verdictLines, NEEDED } = await import(
+    '../scripts/welcome-doctor.mjs'
+  );
+  const GUILD = '4242';
+  const BOT = '9001';
+  const BOTS_ROLE = '7001';
+  const ALL_FOUR = Object.values(NEEDED).reduce((a, b) => a | b, 0n);
+  const VIEW = NEEDED['View Channel'];
+  const ATTACH = NEEDED['Attach Files'];
+  const base = {
+    guildId: GUILD,
+    botId: BOT,
+    ownerId: '1',
+    roles: [
+      { id: GUILD, permissions: String(ALL_FOUR) }, // @everyone's role id IS the guild id
+      { id: BOTS_ROLE, permissions: '0' },
+    ],
+    memberRoleIds: [BOTS_ROLE],
+  };
+
+  assert.deepEqual(missingPermissions(computePermissions(base)), [], 'inherits @everyone with no overwrites');
+
+  // The classic: someone locks #welcome down to read-only for @everyone. The
+  // bot loses Send Messages with it, and the card is refused with a 403 that
+  // says nothing about which bit is missing.
+  assert.deepEqual(
+    missingPermissions(
+      computePermissions({ ...base, overwrites: [{ id: GUILD, type: 0, allow: '0', deny: String(NEEDED['Send Messages']) }] }),
+    ),
+    ['Send Messages'],
+  );
+
+  // A role allow must beat the @everyone deny — that is how a locked channel is
+  // opened to one bot, and reporting it as still-denied would send the owner
+  // hunting for a problem that is not there.
+  assert.deepEqual(
+    missingPermissions(
+      computePermissions({
+        ...base,
+        overwrites: [
+          { id: GUILD, type: 0, allow: '0', deny: String(ALL_FOUR) },
+          { id: BOTS_ROLE, type: 0, allow: String(ALL_FOUR), deny: '0' },
+        ],
+      }),
+    ),
+    [],
+  );
+
+  // Role overwrites are unioned first and the union of allows is applied AFTER
+  // the union of denies, so one role allowing Attach Files beats another role
+  // denying it. Subtracting per role in sequence would report the opposite and
+  // send the owner editing a channel that is already correct.
+  const twoRoles = {
+    ...base,
+    memberRoleIds: [BOTS_ROLE, '7002'],
+    roles: [...base.roles, { id: '7002', permissions: '0' }],
+  };
+  assert.deepEqual(
+    missingPermissions(
+      computePermissions({
+        ...twoRoles,
+        overwrites: [
+          { id: BOTS_ROLE, type: 0, allow: String(ALL_FOUR), deny: '0' },
+          { id: '7002', type: 0, allow: '0', deny: String(ATTACH) },
+        ],
+      }),
+    ),
+    [],
+  );
+  // With nothing allowing it back, the same deny does take the bit away.
+  assert.deepEqual(
+    missingPermissions(
+      computePermissions({ ...twoRoles, overwrites: [{ id: '7002', type: 0, allow: '0', deny: String(ATTACH) }] }),
+    ),
+    ['Attach Files'],
+  );
+
+  // A member-level overwrite on the bot itself is applied last and wins.
+  assert.deepEqual(
+    missingPermissions(
+      computePermissions({
+        ...base,
+        overwrites: [
+          { id: GUILD, type: 0, allow: '0', deny: String(ALL_FOUR) },
+          { id: BOT, type: 1, allow: String(ALL_FOUR), deny: '0' },
+        ],
+      }),
+    ),
+    [],
+  );
+  assert.deepEqual(
+    missingPermissions(
+      computePermissions({
+        ...base,
+        overwrites: [{ id: BOT, type: 1, allow: '0', deny: String(VIEW) }],
+      }),
+    ),
+    ['View Channel'],
+  );
+
+  // Administrator ignores every overwrite, including a deny aimed at the bot.
+  assert.deepEqual(
+    missingPermissions(
+      computePermissions({
+        ...base,
+        roles: [{ id: GUILD, permissions: '0' }, { id: BOTS_ROLE, permissions: String(1n << 3n) }],
+        overwrites: [{ id: BOT, type: 1, allow: '0', deny: String(ALL_FOUR) }],
+      }),
+    ),
+    [],
+  );
+
+  // The intent bit: either GATEWAY_GUILD_MEMBERS (verified app) or its LIMITED
+  // twin (under 100 servers) means the portal toggle is on. Neither means the
+  // gateway closes the worker with 4014 and no card is ever posted.
+  assert.equal(membersIntentEnabled(0), false);
+  assert.equal(membersIntentEnabled(1 << 14), true);
+  assert.equal(membersIntentEnabled(1 << 15), true);
+  assert.equal(membersIntentEnabled((1 << 13) | (1 << 18)), false, 'presence and message-content bits are not this one');
+
+  // Every failing verdict carries its fix, indented under the line, or the
+  // report is a list of complaints with no instructions.
+  const lines = verdictLines({ n: 3, status: 'FAIL', title: 'Server Members intent is enabled', detail: 'OFF', fix: 'fix  flip it\nin the portal' });
+  assert.match(lines[0], /^ 3\. FAIL {2}Server Members intent is enabled — OFF$/);
+  assert.deepEqual(lines.slice(1), ['         fix  flip it', '         in the portal']);
+});
+
+test('the worker image gets the card renderer: sharp is a runtime dependency', async () => {
+  // Dockerfile.presence installs with --omit=dev, so a devDependency is simply
+  // absent in the deployed worker. renderWelcomeCard imports sharp, and with it
+  // missing every join throws "Cannot find package 'sharp'" — cards stop, and
+  // nothing else does, which is exactly how this went unnoticed once.
+  const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+  assert.ok(manifest.dependencies?.sharp, 'sharp must be in dependencies, not devDependencies');
+  assert.ok(!manifest.devDependencies?.sharp, 'and only there, so --omit=dev cannot drop it');
+  const dockerfile = fs.readFileSync(path.join(ROOT, 'Dockerfile.presence'), 'utf8');
+  assert.match(dockerfile, /--omit=dev/, 'the assumption above still holds for the worker image');
+});
+
 // ═══ runner ═══════════════════════════════════════════════════════════════════
+
+// ── session revocation ────────────────────────────────────────────────────────
+// A stateless 7-day cookie has no off switch by itself: a stolen laptop stays
+// signed in until it expires and "Sign out" only clears one browser. Every
+// cookie now carries the account's session generation; "Log out everywhere"
+// bumps it and anything issued before is refused. Cookies minted before
+// generations existed carry none: a deploy must not sign everyone out, so
+// they count as generation 0 (what every account starts at) — valid until the
+// account revokes, and dead the moment it does. A permanent exemption would
+// spare exactly the stolen-before-deploy device the button exists for.
+test('session revocation: log out everywhere kills every cookie, a fresh login works, pre-generation cookies die with it', async () => {
+  const UID = '516000000000000016';
+  const meWith = async (cookie) => (await (await fetch(`${appUrl}/api/me`, { headers: { cookie } })).json()).loggedIn;
+  const logoutAll = (headers, body = '{}') => fetch(`${appUrl}/api/auth/logout-all`, { method: 'POST', headers, body });
+  // The same shape as src/lib/session.js, so the suite can mint a cookie of
+  // any vintage: no generation at all, or a deliberately stale one.
+  const mint = (payload) => {
+    const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
+    const mac = crypto.createHmac('sha256', 'e2e-session-secret-0123456789-abcdef').update(body).digest('base64url');
+    return `tl_session=${body}.${mac}`;
+  };
+  const exp = nowSec() + 3600;
+
+  const laptop = await signInAs('code_u16', UID, 'revoker');
+  const phone = await signInAs('code_u16', UID, 'revoker');
+  assert.equal(await meWith(laptop), true);
+  assert.equal(await meWith(phone), true);
+  const issued = JSON.parse(Buffer.from(laptop.split('=')[1].split('.')[0], 'base64url').toString('utf8'));
+  assert.equal(typeof issued.gen, 'number', 'a login cookie carries the session generation');
+  // Deploy safety: a cookie minted before generations existed still works for
+  // an account that has never revoked, so shipping this signs nobody out.
+  assert.equal(await meWith(mint({ uid: UID, exp })), true, 'a pre-generation cookie is still good until the account revokes');
+
+  // CSRF shape: a same-origin JSON POST from a signed-in browser, nothing else.
+  assert.equal((await fetch(`${appUrl}/api/auth/logout-all`, { headers: { cookie: laptop } })).status, 405, 'GET never revokes');
+  assert.equal((await logoutAll({ cookie: laptop, 'content-type': 'application/x-www-form-urlencoded' }, 'x=1')).status, 415, 'a cross-site form post is refused');
+  assert.equal((await logoutAll({ 'content-type': 'application/json' })).status, 401, 'no session, nothing to revoke');
+  assert.equal(await meWith(laptop), true, 'refused calls revoke nothing');
+
+  const out = await logoutAll({ cookie: phone, 'content-type': 'application/json' });
+  assert.equal(out.status, 200);
+  assert.ok(out.headers.getSetCookie().some((c) => /^tl_session=;/.test(c) && /Max-Age=0/.test(c)), 'the revoking browser is signed out in the reply');
+  assert.equal(await meWith(laptop), false, 'the other device is signed out');
+  assert.equal(await meWith(phone), false, 'the revoking device is signed out');
+  assert.equal((await fetch(`${appUrl}/api/my/guilds`, { headers: { cookie: laptop } })).status, 401, 'a revoked cookie fails closed');
+  assert.equal((await logoutAll({ cookie: laptop, 'content-type': 'application/json' })).status, 401, 'a revoked cookie cannot revoke again');
+
+  const again = await signInAs('code_u16', UID, 'revoker');
+  assert.equal(await meWith(again), true, 'a fresh login is issued under the new generation');
+  assert.equal(await meWith(laptop), false, 'the fresh login does not resurrect the old cookie');
+  const reissued = JSON.parse(Buffer.from(again.split('=')[1].split('.')[0], 'base64url').toString('utf8'));
+  assert.ok(reissued.gen > issued.gen, 'the generation moved forward');
+
+  // Legacy cookie: same user, valid signature, no generation field. It read as
+  // generation 0 above; the revoke moved the account past 0, so it is gone —
+  // and it cannot revoke on its own behalf either.
+  assert.equal(await meWith(mint({ uid: UID, exp })), false, 'a pre-generation cookie is refused once the account has logged out everywhere');
+  assert.equal((await logoutAll({ cookie: mint({ uid: UID, exp }), 'content-type': 'application/json' })).status, 401, 'and it cannot act');
+  assert.equal(await meWith(mint({ uid: UID, exp, gen: issued.gen })), false, 'a stale generation is refused even with a valid signature');
+  assert.equal(await meWith(mint({ uid: UID, exp, gen: reissued.gen })), true, 'the current generation is accepted');
+  assert.equal(await meWith(mint({ uid: UID, exp, gen: String(reissued.gen) })), false, 'a generation that is not a number fails closed');
+  assert.equal(await meWith(mint({ uid: '516000000000000099', exp, gen: 0 })), false, 'a generation cookie for an account that never signed in fails closed');
+});
+
+// The generation is cached per process for a minute to keep reads off the DB,
+// and in production every api/*.js is its OWN process — so a revoke run by the
+// logout-all function is invisible to every other endpoint until its entry
+// ages out. Reads may live with that lag. Writes may not: api/admin/store.js
+// (and api/onboard.js) rotate the store's Stripe key and hand the CALLER a
+// replacement cookie carrying the new generation, so a cached check there let
+// the holder of a revoked cookie mint themselves seven fresh days, lock the
+// seller out of their own account, and point the store's payouts at their key.
+test('session revocation: a revoke on another instance stops writes here at once, not in a minute', async () => {
+  const UID = '516000000000000017';
+  const meWith = async (cookie) => (await (await fetch(`${appUrl}/api/me`, { headers: { cookie } })).json()).loggedIn;
+  const cookie = await signInAs('code_u17', UID, 'rotator');
+  assert.equal(await meWith(cookie), true, 'this read warms the instance cache with the current generation');
+
+  // A "log out everywhere" served by another instance: the row moves, this
+  // process's cache does not. Written straight to the DB, which is exactly
+  // what the other process's bump looks like from here.
+  await tq('UPDATE users SET session_gen = session_gen + 1 WHERE discord_id = ?', [UID]);
+  assert.equal(await meWith(cookie), true, 'a read may still trust the cached generation for up to a minute');
+
+  const rotate = await fetch(`${appUrl}/api/admin/store`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', cookie },
+    body: JSON.stringify({ store: 'no-such-store', stripeKey: 'sk_test_attacker_key' }),
+  });
+  // 404 would mean the revoked cookie got past the door and was only stopped
+  // by the store lookup.
+  assert.equal(rotate.status, 401, 'a mutating admin call re-reads the generation and refuses the revoked cookie');
+  assert.deepEqual(rotate.headers.getSetCookie().filter((c) => c.startsWith('tl_session=')), [], 'and mints no replacement cookie');
+  assert.equal((await fetch(`${appUrl}/api/auth/logout-all`, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: '{}' })).status, 401, 'nor can it revoke again from a stale cache');
+});
 
 async function main() {
   await initTestDb();

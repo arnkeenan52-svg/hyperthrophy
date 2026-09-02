@@ -10,13 +10,13 @@
   <link rel="icon" type="image/png" sizes="96x96" href="/favicon-96x96.png" />
   <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
   <link rel="manifest" href="/site.webmanifest" />
-  <link rel="stylesheet" href="/styles.css?v=197" />
-  <script src="/theme.js?v=197"></script>
+  <link rel="stylesheet" href="/styles.css?v=198" />
+  <script src="/theme.js?v=198"></script>
 </head>
 <body>
   <header class="top">
     <div class="top-left">
-      <img class="platform-mark" src="/dues.png?v=197" alt="Dues" height="20" />
+      <img class="platform-mark" src="/dues.png?v=198" alt="Dues" height="20" />
     </div>
     <div class="top-right">
       <div id="account" class="account"></div>
@@ -25,6 +25,7 @@
   </header>
 
   <main class="checkout">
+    <noscript><p class="callout">This receipt needs JavaScript enabled — turn it on for this site and reload.</p></noscript>
     <div class="brand">
       <div class="check-ring pending" id="check-ring" role="status" aria-live="polite">
         <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -35,7 +36,7 @@
       <p class="tagline" id="r-sub">Finishing up your order…</p>
     </div>
 
-    <section class="panel">
+    <section class="panel" id="r-details">
       <p class="label">Order details</p>
       <div class="order-row"><span class="k">Server</span><span class="v" id="r-server">—</span></div>
       <div class="order-row"><span class="k">Product</span><span class="v" id="r-product">—</span></div>
@@ -54,10 +55,10 @@
 
   <footer>
     <span class="powered-label">Checkout powered by:</span>
-    <img class="powered-mark" src="/dues.png?v=197" alt="Dues" height="18" />
-    <a class="powered-community" href="https://discord.gg/G6yjsX5qbB" rel="noopener">Join the Dues community</a>
+    <img class="powered-mark" src="/dues.png?v=198" alt="Dues" height="18" />
+    <a class="powered-community" href="/api/community" rel="noopener">Join the Dues community</a>
   </footer>
 
-  <script src="/receipt.js?v=197"></script>
+  <script src="/receipt.js?v=198"></script>
 </body>
 </html>

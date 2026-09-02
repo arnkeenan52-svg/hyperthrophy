@@ -10,26 +10,27 @@
     "test:slug": "node scripts/test-store-slug-collision.mjs",
     "migrate": "node scripts/migrate.js",
     "doctor": "node scripts/doctor.js",
+    "doctor:welcome": "node scripts/welcome-doctor.mjs",
     "presence": "node scripts/presence.js",
     "test:presence": "node scripts/presence-test.js",
     "post": "node scripts/post-message.mjs",
     "test:post": "node scripts/post-test.js",
     "og": "node scripts/build-og-card.mjs",
-    "test:dash": "node scripts/_verify-dash.mjs --check",
+    "test:dash": "node scripts/verify-dash.mjs --check",
     "test:footer": "node scripts/verify-phone-footer.mjs",
-    "baseline:dash": "node scripts/_verify-dash.mjs"
+    "baseline:dash": "node scripts/verify-dash.mjs"
   },
   "engines": {
     "node": ">=22.5.0"
   },
   "dependencies": {
     "pg": "^8.23.0",
-    "qrcode-generator": "^2.0.4"
+    "qrcode-generator": "^2.0.4",
+    "sharp": "^0.35.3"
   },
   "devDependencies": {
     "jsqr": "^1.4.0",
     "playwright": "^1.62.1",
-    "pngjs": "^7.0.0",
-    "sharp": "^0.35.3"
+    "pngjs": "^7.0.0"
   }
 }

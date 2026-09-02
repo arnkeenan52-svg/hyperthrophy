@@ -3,11 +3,12 @@ import { capabilities } from '../../src/config.js';
 import { storeBySlug, planOf } from '../../src/services/stores.js';
 import { sendJson, sendText, readJsonBody, guard } from '../../src/lib/http.js';
 import { sessionUserId } from '../../src/lib/session.js';
-import { purchaseBlocked, resolveDiscount } from '../../src/services/purchase-guard.js';
+import { purchaseBlocked, resolveDiscount, seatLimitFor, DISCOUNT_WINDOW_SECONDS, MAX_DISCOUNT_MISSES } from '../../src/services/purchase-guard.js';
 import { publicPaymentView } from '../../src/services/nowpayments-events.js';
 import { createPayment, getPayment, merchantCoins, minimumFor } from '../../src/lib/nowpayments.js';
 import { normalize as normalizeCurrency, formatAmount, minCharge } from '../../src/lib/currency.js';
 import { qrForPayment } from '../../src/lib/qr.js';
+import { CHECKOUT_TTL_SECONDS } from '../../src/lib/stripe.js';
 import * as db from '../../src/db.js';
 
 // The crypto rail (NOWPayments).
@@ -22,6 +23,27 @@ import * as db from '../../src/db.js';
 // (src/lib/nowpayments.js explains why that is a precondition, not a setting).
 
 const ORDER_RE = /^np_[0-9a-f]{32}$/;
+
+// Live invoices one buyer may hold in one store. One is all a purchase
+// needs; a couple more cover a changed mind about the coin. Past that it is
+// a loop, and every invoice it mints holds a seat and a discount use until
+// the provider gives up on it.
+const MAX_OPEN_INVOICES = 3;
+
+// How long a live invoice holds its seat and its discount use.
+//
+// NOT expiration_estimate_date: that is when the QUOTED COIN AMOUNT stops
+// being valid, and the deposit address stays payable long past it — a payment
+// is only given up on when nothing was sent to it for a week, which is exactly
+// the window src/services/backfill.js keeps asking the provider about it for,
+// and a late `finished` grants like any other. Releasing the seat at the rate
+// quote's expiry put it back on sale while the first buyer could still pay: if
+// they then did, the second buyer's irreversible crypto payment was refused at
+// settlement with nothing delivered. The hold ends when the payment is really
+// closed — the IPN or the cron marks the row expired on expired/failed/
+// refunded — and the buyer's own countdown still runs to the quote's expiry,
+// which is what the pay screen is given below.
+const INVOICE_HOLD_SECONDS = 7 * 86400;
 
 async function loadStore(slug) {
   const store = await storeBySlug(typeof slug === 'string' ? slug : '');
@@ -49,12 +71,20 @@ export default guard(async function handler(req, res) {
         sendJson(res, 400, { error: 'bad request' });
         return;
       }
-      const uid = sessionUserId(req);
+      const uid = await sessionUserId(req);
       const attempt = await db.getCheckoutAttempt(order);
       // Someone else's order is not "not found by accident" — an order id is
       // guessable enough to be worth refusing on identity, not on existence.
       if (!attempt || !uid || attempt.discord_id !== uid) {
         sendJson(res, 404, { error: 'unknown order' });
+        return;
+      }
+      // The row is flipped to completed by the webhook, after the grant. It
+      // is the stronger source: a poll must never keep saying "waiting" for
+      // a sale that has already landed — not when the payment id never got
+      // attached below, and not when the provider is unreachable right now.
+      if (attempt.status === 'completed') {
+        sendJson(res, 200, publicPaymentView({ payment_status: 'finished' }, { currency: attempt.currency }));
         return;
       }
       if (!attempt.provider_ref) {
@@ -66,7 +96,7 @@ export default guard(async function handler(req, res) {
         // browser sent, and answer with a buyer-shaped view: no address, no
         // ids, nothing about the seller's wallet.
         const payment = await getPayment(attempt.provider_ref);
-        sendJson(res, 200, publicPaymentView(payment, { currency: attempt.currency }));
+        sendJson(res, 200, publicPaymentView(payment, { currency: attempt.currency, delivered: attempt.status === 'completed' }));
       } catch (err) {
         console.error(`[checkout] nowpayments status for ${order} failed: ${err.message}`);
         sendJson(res, 502, { error: 'Could not check that payment just now — try again in a moment.' });
@@ -76,15 +106,20 @@ export default guard(async function handler(req, res) {
 
     // ── the coin picker ──────────────────────────────────────────────────
     if (url.searchParams.get('coins')) {
-      // A store with no payout wallet cannot take crypto at all, and saying
-      // so here is what keeps the storefront from offering a button that can
-      // only fail.
-      if (!String(store.cryptoWallet ?? '').trim()) {
+      // A store with no payout wallet — or one with no chain to pay it on —
+      // cannot take crypto at all, and saying so here is what keeps the
+      // storefront from offering a button that can only fail. Same pair the
+      // POST below refuses on, so the picker never fills with coins the
+      // payment is going to turn down.
+      if (!String(store.cryptoWallet ?? '').trim() || !String(store.cryptoChain ?? '').trim()) {
         sendJson(res, 200, { ready: false, coins: [] });
         return;
       }
       try {
-        sendJson(res, 200, { ready: true, coins: await merchantCoins() });
+        // No coins is the same answer as no wallet: nothing here can be paid
+        // with, so say so instead of offering an empty picker.
+        const coins = await merchantCoins();
+        sendJson(res, 200, { ready: coins.length > 0, coins });
       } catch (err) {
         console.error(`[checkout] nowpayments coin list failed: ${err.message}`);
         sendJson(res, 502, { error: 'Could not load the coin list just now.' });
@@ -100,7 +135,7 @@ export default guard(async function handler(req, res) {
     return;
   }
 
-  const uid = sessionUserId(req);
+  const uid = await sessionUserId(req);
   if (!uid) {
     sendJson(res, 401, { error: 'log in with Discord first' });
     return;
@@ -122,11 +157,13 @@ export default guard(async function handler(req, res) {
     sendJson(res, blocked.status, { error: blocked.error });
     return;
   }
+  // The same purchase limit, to be held again by the reservation's INSERT.
+  const seatLimit = await seatLimitFor({ store, plan, uid });
   // No wallet, no sale. Refusing here is the whole custody guarantee: a
   // payment created without a payout address settles into the platform's
   // NOWPayments balance, and this account still has custody switched on.
-  if (!String(store.cryptoWallet ?? '').trim()) {
-    console.error(`[checkout] ${store.slug} has crypto enabled but no payout wallet — refusing to create a payment`);
+  if (!String(store.cryptoWallet ?? '').trim() || !String(store.cryptoChain ?? '').trim()) {
+    console.error(`[checkout] ${store.slug} has crypto enabled but no payout wallet or chain — refusing to create a payment`);
     sendJson(res, 409, { error: 'This store has not finished setting up crypto payments yet. Pay by card, or check back shortly.' });
     return;
   }
@@ -152,8 +189,21 @@ export default guard(async function handler(req, res) {
   let amount = plan.priceUsd;
   let discountCode = null;
   if (typeof body?.discountCode === 'string' && body.discountCode.trim()) {
-    const applied = await resolveDiscount({ store, plan, code: body.discountCode });
+    // Checkout separates "no such code" from "here is your discount" just as
+    // plainly as the preview does, and to anyone with a Discord login — so it
+    // spends the same guessing budget, kept in the database because this ships
+    // as serverless functions. Only the per-asker count gates here: a
+    // store-wide refusal on the money path would let a stranger switch off
+    // every seller's discount codes mid-sale. Past the budget a valid code is
+    // refused too, or the refusal itself would be the tell.
+    const since = Math.floor(Date.now() / 1000) - DISCOUNT_WINDOW_SECONDS;
+    if ((await db.countDiscountMisses(`u:${uid}`, since)) >= MAX_DISCOUNT_MISSES) {
+      sendJson(res, 429, { error: 'Too many code attempts — try again in a few minutes.' });
+      return;
+    }
+    const applied = await resolveDiscount({ store, plan, code: body.discountCode, uid });
     if (applied.error) {
+      await db.recordDiscountMiss(`u:${uid}`, store.slug, since).catch(() => {});
       sendJson(res, 400, { error: applied.error });
       return;
     }
@@ -178,9 +228,17 @@ export default guard(async function handler(req, res) {
   // be possible for money to move while the row is still missing. A row with
   // no payment behind it is just an abandoned checkout, which is a thing the
   // table already models.
+  //
+  // It is also the reservation: the seat and the buyer's invoice cap are
+  // counted by the INSERT itself, so a burst of parallel clicks cannot each
+  // read "nothing taken yet" and then each be handed an address. The guard
+  // above already answered for this buyer — this is the same rule, enforced
+  // where it holds, and it runs before the provider is asked for anything.
   const orderId = `np_${crypto.randomUUID().replace(/-/g, '')}`;
+  const reservedSince = Math.floor(Date.now() / 1000) - CHECKOUT_TTL_SECONDS;
+  let reserved;
   try {
-    await db.recordCheckoutAttempt({
+    reserved = await db.insertCheckoutAttemptWithin({
       storeId: store.id ?? null,
       planId: plan.id,
       discordId: uid,
@@ -188,10 +246,24 @@ export default guard(async function handler(req, res) {
       amountUsd: amount,
       currency,
       discountCode,
+      seatLimit,
+      maxOpenCrypto: MAX_OPEN_INVOICES,
+      reservedSince,
     });
   } catch (err) {
     console.error(`[checkout] could not log crypto attempt ${orderId}: ${err.message}`);
     sendJson(res, 500, { error: 'Payment could not be started — try again in a moment.' });
+    return;
+  }
+  if (!reserved) {
+    // Which of the two limits refused it — the same counts the INSERT just
+    // took, so the buyer reads the reason that actually applies.
+    const open = await db.countOpenCryptoAttemptsBy(store.id ?? null, uid, reservedSince).catch(() => MAX_OPEN_INVOICES);
+    if (open >= MAX_OPEN_INVOICES) {
+      sendJson(res, 429, { error: 'You already have crypto payments waiting — pay one of those, or let them expire before starting another.' });
+      return;
+    }
+    sendJson(res, 409, { error: 'This product is sold out.' });
     return;
   }
 
@@ -200,11 +272,16 @@ export default guard(async function handler(req, res) {
     payment = await createPayment({ plan, store, amount, payCurrency, orderId });
   } catch (err) {
     console.error(`[checkout] nowpayments payment for ${uid}/${plan.id} (store ${store.slug}) failed: ${err.message}`);
+    // No payment, nothing to pay: the row must not hold a seat or a discount
+    // use for a purchase that cannot happen.
+    await db.releaseCheckoutAttempt(orderId).catch(() => {});
     // The one provider error worth translating: the order is below what that
     // coin's network can economically settle. Everything else is a setup
     // problem the buyer can do nothing about.
     if (/minim|too small/i.test(err.message)) {
-      const min = await minimumFor(payCurrency, payCurrency).catch(() => null);
+      // The minimum is per pair, and the pair is the buyer's coin into the
+      // SELLER's payout coin — the same one createPayment just asked for.
+      const min = await minimumFor(payCurrency, String(store.cryptoChain || payCurrency).toLowerCase()).catch(() => null);
       const amt = min?.min_amount ?? min?.fiat_equivalent ?? null;
       sendJson(res, 409, {
         error: amt
@@ -217,9 +294,10 @@ export default guard(async function handler(req, res) {
     return;
   }
 
-  await db.setCheckoutAttemptRef(orderId, String(payment.payment_id)).catch((err) => {
+  await db.setCheckoutAttemptRef(orderId, String(payment.payment_id), Math.floor(Date.now() / 1000) + INVOICE_HOLD_SECONDS).catch((err) => {
     // Not fatal: the IPN still resolves the order by order_id. Only the
-    // buyer's live status poll degrades, and it degrades to "waiting".
+    // buyer's live status poll degrades, and it degrades to "waiting" until
+    // the webhook marks the row completed (the poll reads that first).
     console.error(`[checkout] could not attach payment id to ${orderId}: ${err.message}`);
   });
 

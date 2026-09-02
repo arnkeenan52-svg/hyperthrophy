@@ -20,7 +20,7 @@
   <meta property="og:type" content="website" />
   <meta property="og:title" content="Dues — Sell Discord access" />
   <meta property="og:description" content="0% platform fees. Payments land in your own Stripe account. Roles delivered in seconds." />
-  <meta property="og:image" content="https://dues.gg/og-card.jpg?v=197" />
+  <meta property="og:image" content="https://dues.gg/og-card.jpg?v=198" />
   <meta property="og:image:type" content="image/jpeg" />
   <meta property="og:image:width" content="1200" />
   <meta property="og:image:height" content="630" />
@@ -40,7 +40,7 @@
   <meta name="twitter:site" content="@duesdiscord" />
   <meta name="twitter:creator" content="@duesdiscord" />
   <meta name="twitter:description" content="0% platform fees. Payments land in your own Stripe account. Roles delivered in seconds." />
-  <meta name="twitter:image" content="https://dues.gg/og-card.jpg?v=197" />
+  <meta name="twitter:image" content="https://dues.gg/og-card.jpg?v=198" />
   <meta name="twitter:image:alt" content="The Dues homepage: a bright daytime sky with the headline &#39;Monetize your community.&#39; and a field for claiming a store link" />
   <link rel="icon" href="/favicon.ico" sizes="48x48 96x96" />
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
@@ -68,7 +68,7 @@
 }
 @font-face{
   font-family:'Plus Jakarta Sans';
-  src:url('/jakarta-latin.woff2?v=197') format('woff2');
+  src:url('/jakarta-latin.woff2?v=198') format('woff2');
   font-weight:200 800;font-style:normal;font-display:block;
 }
 /* Arial re-scaled to Jakarta's metrics: zero layout shift if the woff2 is slow */
@@ -327,7 +327,7 @@ html[data-footer-revealed] .nav{
 .nav-links a{transition:color .2s ease}
 .nav-links a:hover{color:var(--ink)}
 .nav-right{margin-left:auto;display:flex;align-items:center;gap:14px}
-.nav-login{font-size:14.5px;font-weight:500;color:var(--ink);opacity:.85;transition:opacity .2s ease}
+.nav-login{font-size:14.5px;font-weight:500;color:var(--ink);opacity:.85;transition:opacity .2s ease;padding:10px 0;margin:-10px 0}  /* 24px of text, a 44px hit box */
 .nav-login:hover{opacity:1}
 .theme-btn{
   width:44px;height:44px;border-radius:50%;flex:none;   /* 44px: the minimum a thumb can hit */
@@ -445,7 +445,7 @@ html:not([data-theme="light"]) .btn-capture:hover{background:#414859}
 }
 .film-frame video{
   width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:12px;
-  background:url('/hero-poster.webp?v=197') center/cover;
+  background:url('/hero-poster.webp?v=198') center/cover;
 }
 .browser-bar{
   position:relative;height:34px;
@@ -483,6 +483,28 @@ html:not([data-theme="light"]) .sky-card{background:rgba(13,20,32,.6)}
    the sky copy outside the cards gets a soft shadow for the same reason. */
 html:not([data-theme="light"]) .plan{background:rgba(15,13,34,.62)}
 html:not([data-theme="light"]) .microcopy,html:not([data-theme="light"]) .sec-eyebrow,html:not([data-theme="light"]) .mid-note,html:not([data-theme="light"]) .pay-cap,html:not([data-theme="light"]) .pay-note,html:not([data-theme="light"]) .fees-note,html:not([data-theme="light"]) .plan-name i,html:not([data-theme="light"]) .plan-note,html:not([data-theme="light"]) .hero-sub,html:not([data-theme="light"]) .page-hero-sub{text-shadow:0 1px 2px rgba(6,10,24,.55)}
+/* Night, the rest of it: the shadow above buys about one stop, and the cloud
+   bodies the shader paints (luminance to ~0.17, more under the moon's halo)
+   still leave this copy under 4.5:1 whenever one drifts behind it — the 5th
+   percentile measured 3.0–4.0 on the eyebrows, the payment note and the hero
+   microcopy. Dimming the whole sky enough to fix that is ~55% black, which is
+   no sky at all, and a filter on the canvas dims just as much and adds a
+   compositing pass per frame on phones. So the copy that sits on the open sky
+   rides the navy glass the sky-cards, calc panel and plan cards already use:
+   eyebrows as pills, notes as plates, the payment band as a panel, the hero
+   copy on a soft vignette. .62 is the plan-card value (5.2:1 for --micro over
+   the brightest cloud); the eyebrow blue is darker than the greys and needs
+   .74; the --sec hero copy clears on .5. */
+html:not([data-theme="light"]) .sec-eyebrow{display:inline-block;padding:5px 12px;border-radius:10px;background:rgba(13,20,32,.74);border:1px solid rgba(255,255,255,.1)}
+html:not([data-theme="light"]) .mid-note,html:not([data-theme="light"]) .save-demo{padding:9px 14px;border-radius:12px;background:rgba(13,20,32,.62);border:1px solid rgba(255,255,255,.08)}
+html:not([data-theme="light"]) .save-demo{width:fit-content;max-width:100%;margin-inline:auto}
+html:not([data-theme="light"]) .pay{width:min(880px,100% - 32px);margin:0 auto 40px;padding:28px 20px 30px;border-radius:22px;background:rgba(13,20,32,.62);border:1px solid rgba(255,255,255,.08)}
+@media (max-width:600px){html:not([data-theme="light"]) .pay{width:calc(100% - 24px);padding:24px 12px 26px}} /* the chip grid keeps the width it had, so Cash App stays on one line */
+html:not([data-theme="light"]) .hero-core::before{
+  content:"";position:absolute;top:50%;left:50%;width:1440px;height:760px;transform:translate(-50%,-50%);
+  z-index:-1;pointer-events:none;
+  background:radial-gradient(ellipse 50% 50% at 50% 50%,rgba(13,20,32,.5) 0,rgba(13,20,32,.5) 55%,rgba(13,20,32,0) 100%);
+}
 .sky-card b{font-weight:700;color:var(--money)}
 .sky-card small{display:block;font-size:11.5px;font-weight:400;color:var(--micro);margin-top:1px}
 .card-sale{left:-18px;bottom:-20px}
@@ -499,7 +521,7 @@ html[data-theme="light"] .chip-film-embed{border-color:rgba(15,22,38,.12)}
 /* ============ role marquee strip ============ */
 .rolemarq{padding:96px 0 12px;overflow:hidden}
 .marq-cap{
-  text-align:center;font-size:11.5px;font-weight:500;letter-spacing:.14em;
+  text-align:center;font-size:12px;font-weight:500;letter-spacing:.14em;
   text-transform:uppercase;color:var(--micro);margin-bottom:20px;
 }
 
@@ -1018,7 +1040,7 @@ input[type=range]:focus-visible{outline:2px solid var(--accent);outline-offset:4
 .billing-toggle button.on{background:#f5f5f4;color:#101010}
 .billing-toggle button:focus-visible{outline:2px solid #f5f5f4;outline-offset:2px}
 .tog-save{
-  font-size:11px;font-weight:500;line-height:1;letter-spacing:.02em;
+  font-size:12px;font-weight:500;line-height:1;letter-spacing:.02em;
   color:#4ade80;background:rgba(74,222,128,.14);
   padding:4px 9px;border-radius:999px;white-space:nowrap;
 }
@@ -1199,7 +1221,9 @@ input[type=range]:focus-visible{outline:2px solid var(--accent);outline-offset:4
   .crescendo{padding:72px 32px 80px}
 }
 @media (max-width:600px){
-  .wrap{padding-inline:20px}
+  /* the phone gutter, declared once: 16px is what .slab (100% - 32px) and
+     .hero-core already sit at, so every section lines up with the hero. */
+  .wrap{padding-inline:16px}
   .announce{font-size:13px;line-height:18px}
   .slab{width:calc(100% - 32px)}
   .hero-core{padding:64px 16px 0}
@@ -1333,7 +1357,7 @@ h2.sec-display{
 }
 .t2{color:var(--gl-blue)}
 .kicker{
-  display:block;font:600 11.5px/1 var(--sans);letter-spacing:.16em;
+  display:block;font:600 12px/1 var(--sans);letter-spacing:.16em;
   text-transform:uppercase;color:var(--gl-micro);
 }
 
@@ -1531,13 +1555,13 @@ html:not([data-theme="light"]) .calc{background:rgba(15,22,38,.55);border-color:
   position:relative;display:flex;align-items:center;justify-content:center;gap:26px;
   padding:10px 24px 30px;font-size:13.5px;font-weight:500;
 }
-.hero-foot a{color:inherit;opacity:.72;transition:opacity .2s ease;display:inline-flex;align-items:center;min-height:32px}
+.hero-foot a{color:inherit;opacity:.72;transition:opacity .2s ease;display:inline-flex;align-items:center;min-height:44px;margin:-6px 0}  /* a 44px hit box that takes the 32px of row it always did */
 .hero-foot a:hover{opacity:1}
 .hf-sep{width:1px;height:14px;background:currentColor;opacity:.28}
 /* qualified with the ancestor on purpose: `.hero-foot a` sets min-height:32px
    at (0,1,1) and a bare .hf-ic at (0,1,0) loses to it, so the icons stayed
    32px tall however large the min-height on them said they were. */
-.hero-foot a.hf-ic{min-width:44px;min-height:44px;justify-content:center}  /* the svg alone is 17px */
+.hero-foot a.hf-ic{min-width:44px;min-height:44px;margin:0;justify-content:center}  /* the svg alone is 17px */
 .hf-ic svg{width:17px;height:17px;fill:currentColor;display:block}
 html[data-theme="light"] .hero-foot{color:#0f1626}
 html:not([data-theme="light"]) .hero-foot{color:#f2f5fb}
@@ -1676,17 +1700,23 @@ html[data-theme="light"] .footer{
   display:inline-flex;align-items:center;justify-content:center;position:relative;
   width:32px;height:32px;border-radius:8px;background:rgba(255,255,255,.14);color:#fff;transition:background .15s;
 }
-.footer .soc-tile::after{content:"";position:absolute;inset:-4px}
+.footer .soc-tile::after{content:"";position:absolute;inset:-6px}  /* 32px tile, 44px hit box */
 .footer .soc-tile:hover{background:rgba(255,255,255,.26)}
 .footer .soc-tile svg{width:15px;height:15px;fill:currentColor}
 .footer .fcol{display:flex;flex-direction:column;gap:11px;min-width:0}
+/* 12px, not 10.5: the phone floor. Leading 1.1 keeps the 13px line box the
+   10.5px label had, so the footer height (and its fit budget) is unchanged. */
 .footer .fcol b{
   margin:0 0 3px;color:rgba(255,255,255,.64);
   font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
-  font-size:10.5px;font-weight:500;line-height:1.25;letter-spacing:.08em;text-transform:uppercase;
+  font-size:12px;font-weight:500;line-height:1.1;letter-spacing:.08em;text-transform:uppercase;
 }
-.footer .fcol a{display:inline-flex;align-items:center;min-height:21px;padding:0;color:rgba(255,255,255,.82);font-size:14px;line-height:1.5;transition:color .15s}
+.footer .fcol a{position:relative;display:inline-flex;align-items:center;min-height:21px;padding:0;color:rgba(255,255,255,.82);font-size:14px;line-height:1.5;transition:color .15s}
 .footer .fcol a:hover{color:#fff}
+/* A 25px hit box on a 20px row, reaching up into the gap above. Not 44: these
+   rows sit inside the footer fit budget, and the column balancer counts overflow
+   BELOW a box, so the box can only grow upward without growing the footer. */
+.footer .fcol a::after{content:"";position:absolute;inset:-5px 0 0}
 /* day footer runs on the kit's dark ink over the light ground. The title used
    to stay white here and measured 1.91:1 against #bcd5f0 — under even the 3:1
    large-text floor — so it takes the ink too. */
@@ -1778,7 +1808,9 @@ html[data-theme="light"] .footer .fcol a:hover{color:#030507}
 }
 
 /* ── the savings box: Subscord's calculator, on our glass ── */
-.save{padding:72px 24px 88px}
+/* padding-block only: the desktop gutter is .wrap's 48px, shared with the nav
+   and the FAQ — a padding shorthand here silently reset it to something else */
+.save{padding-block:72px 88px}
 .save-card{
   width:min(640px,100%);margin:0 auto;padding:34px clamp(20px,4vw,40px) 28px;border-radius:26px;
   background:var(--glass);border:1px solid var(--glass-brd);
@@ -1827,7 +1859,7 @@ html[data-theme="light"] .footer .fcol a:hover{color:#030507}
 .save-field input[type=range]::-moz-range-progress{height:6px;border-radius:99px;background:var(--blue)}
 .save-field input[type=range]::-moz-range-thumb{width:18px;height:18px;border-radius:50%;background:var(--blue);border:2.5px solid #fff}
 .save-hero{margin:26px 0 22px;padding:20px 16px;border-radius:18px;text-align:center;background:rgba(88,101,242,.1);border:1px solid rgba(88,101,242,.28)}
-.save-cap{display:block;font:600 11.5px/1.4 var(--sans);letter-spacing:.08em;text-transform:uppercase;color:var(--sec)}
+.save-cap{display:block;font:600 12px/1.4 var(--sans);letter-spacing:.08em;text-transform:uppercase;color:var(--sec)}
 .save-hero b{display:block;margin-top:6px;font-family:var(--grotesk);font-weight:700;font-size:clamp(36px,5vw,46px);letter-spacing:-.02em;color:#3ddc84}
 html[data-theme="light"] .save-hero b{color:#177245}
 .save-hero small{display:block;margin-top:4px;font-size:12.5px;color:var(--micro)}
@@ -1913,7 +1945,6 @@ html[data-theme="light"] .save-dues .sv-cost{color:#177245}
   .save-field input[type=range]::-webkit-slider-thumb{width:16px;height:16px;margin-top:-5px;border-width:2px}
   .save-field input[type=range]::-moz-range-thumb{width:15px;height:15px;border-width:2px}
   .save-hero{margin:20px 0 0;padding:14px 16px;border-radius:14px}
-  .save-cap{font-size:10.5px}
   .save-hero b{margin-top:3px;font-size:34px}
   .save-hero small{margin-top:2px;font-size:11.5px}
   .save-rows{gap:15px}
@@ -1925,8 +1956,8 @@ html[data-theme="light"] .save-dues .sv-cost{color:#177245}
   .fee-note{font-size:11.5px;line-height:17px}
 }
 /* payment methods: real brand marks on white chips, its own section */
-.pay{padding:8px 24px 40px;display:flex;flex-direction:column;align-items:center;gap:16px}
-.pay-cap{font:600 11px/1.4 var(--sans);letter-spacing:.1em;text-transform:uppercase;color:var(--micro)}
+.pay{padding-block:8px 40px;display:flex;flex-direction:column;align-items:center;gap:16px}
+.pay-cap{font:600 12px/1.4 var(--sans);letter-spacing:.1em;text-transform:uppercase;color:var(--micro)}
 .pay-chips{display:flex;flex-wrap:wrap;justify-content:center;gap:10px;max-width:800px}
 /* desktop: all 14 marks in a strict symmetric 7x2 grid of equal cells */
 @media (min-width:640px){
@@ -1951,7 +1982,9 @@ html[data-theme="light"] .save-dues .sv-cost{color:#177245}
 .pm-klarnachip b{color:#0A0B09;font-size:13.5px;letter-spacing:0}
 .pm-cashchip{background:#00D632;border-color:#00D632}
 .pm-cashchip svg{height:14px}
-.pm-cash-ink{color:#fff;font-size:12.5px;letter-spacing:.01em}
+/* .pm-cashchip b, not a bare class: .pay-chip b outranks a lone class and was
+   quietly winning, leaving this white-on-green logotype the smallest chip */
+.pm-cashchip b{color:#fff;font-size:14px;letter-spacing:.01em;white-space:nowrap}
 .pm-paypalchip b{font-style:italic;letter-spacing:.01em;font-size:13.5px}
 .pm-paypalchip i{font-style:italic}
 .pm-paypalchip .pp1{color:#003087}
@@ -1974,11 +2007,17 @@ html[data-theme="light"] .save-dues .sv-cost{color:#177245}
   .pm-klarnachip b{font-size:12px}
   .pay-chip svg{height:13px}
   .pm-cashchip svg{height:12px}
-  .pm-cash-ink{font-size:11px}
+  .pm-cashchip b{font-size:12.5px}
+}
+/* below 400px a 4-up chip is ~60-75px wide: glyph + wordmark no longer fit on
+   one line, and the old rendering quietly broke "Cash App" over two. The
+   wordmark alone still reads as the brand; the glyph does not */
+@media (max-width:400px){
+  .pm-cashchip svg{display:none}
 }
 @media (max-width:600px){
   .sky-grain{display:none}
-  .save{padding:44px 16px 64px}
+  .save{padding-block:44px 64px}
 }
 
 /* ── phones and touch devices: the sky is a FIXED backdrop (out of flow —
@@ -1991,7 +2030,7 @@ html[data-theme="light"] .save-dues .sv-cost{color:#177245}
 
 /* ── mid-page editorial heads: eyebrow + display left, supporting note right ── */
 .mid-head{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin-bottom:34px}
-.mid-note{flex:none;max-width:30ch;margin:0 0 8px;font-size:14.5px;line-height:22px;color:var(--sec);text-align:right}
+.mid-note{flex:none;max-width:30ch;margin:0 0 8px;font-size:14.5px;line-height:22px;color:var(--sec);text-align:right;text-wrap:balance}
 /* Text that lands directly on the day sky, with no panel under it. These
    colours were picked against --paper (#f4f7fd) and are fine there, but the
    sections carrying them have no background, so they resolve against
@@ -2017,7 +2056,7 @@ html[data-theme="light"] .mid-note{color:#22314f}         /* was #46536e — 2.9
    were answering a different one at four times the height, so the reader had
    to work past a fake settings panel to find "connect Stripe". A centred
    heading and three columns say it outright. */
-.how{padding:64px 24px 30px}
+.how{padding-block:64px 30px}
 .how-title{
   font-family:var(--jakarta);font-weight:600;text-align:center;
   font-size:clamp(30px,4vw,44px);line-height:1.1;letter-spacing:-.02em;color:var(--ink);
@@ -2060,18 +2099,18 @@ html[data-theme="light"] .mid-note{color:#22314f}         /* was #46536e — 2.9
 }
 
 /* ── what platform fees cost ── */
-.why{padding:8px 24px 40px;text-align:center}
+.why{padding-block:8px 40px;text-align:center}
 .why-title{
   font-family:var(--jakarta);font-weight:600;text-align:center;
   font-size:clamp(26px,3.4vw,38px);line-height:1.12;letter-spacing:-.02em;color:var(--ink);
 }
 @media (max-width:600px){
-  .how{padding:48px 16px 24px}
-  .why{padding:4px 16px 28px}
+  .how{padding-block:48px 24px}
+  .why{padding-block:4px 28px}
 }
 
 /* ── what sellers say: featured editorial card + stacked rail ── */
-.voices{padding:34px 24px 26px}
+.voices{padding-block:34px 26px}
 .voices-stage{display:grid;grid-template-columns:minmax(0,7fr) minmax(0,5fr);gap:16px;align-items:stretch}
 .voices-side{display:grid;grid-template-rows:1fr 1fr;gap:16px;min-width:0}
 .voice-card{
@@ -2130,12 +2169,12 @@ html:not([data-theme="light"]) .voice-quote{color:rgba(142,154,255,.14)}
   .voice-lead blockquote{max-width:none}
 }
 @media (max-width:600px){
-  .voices{padding:26px 16px 22px}
+  .voices{padding-block:26px 22px}
   .voice-lead{padding:24px 22px 26px}
 }
 
 /* ── community card: split CTA with a live-presence channel mock ── */
-.comm{padding:26px 24px 56px}
+.comm{padding-block:26px 56px}
 .comm-card{
   position:relative;overflow:hidden;
   display:grid;grid-template-columns:minmax(0,1fr);justify-items:center;text-align:center;gap:clamp(28px,4vw,52px);
@@ -2158,7 +2197,7 @@ html:not([data-theme="light"]) .voice-quote{color:rgba(142,154,255,.14)}
 .comm-checks li{display:inline-flex;align-items:center;gap:9px;font-size:14px;font-weight:600;color:var(--ink)}
 .comm-checks svg{width:18px;height:18px;color:#1f9d5b;flex:none}
 html:not([data-theme="light"]) .comm-checks svg{color:#3ddc84}
-.comm-cta-row{margin-top:24px;display:flex;align-items:center;gap:16px}
+.comm-cta-row{margin-top:24px;display:flex;align-items:center;justify-content:center;gap:16px}
 .comm-btn{flex:none;min-height:48px;padding:13px 26px;font-size:15.5px}
 @media (max-width:900px){
   .comm-card{gap:26px}
@@ -2166,7 +2205,7 @@ html:not([data-theme="light"]) .comm-checks svg{color:#3ddc84}
   .comm-btn{justify-content:center}
 }
 @media (max-width:600px){
-  .comm{padding:22px 16px 48px}
+  .comm{padding-block:22px 48px}
 }
 
 /* ── payment band framing: hairline-flanked caption + settle note ── */
@@ -2314,9 +2353,10 @@ html:not([data-theme="light"]) .comm-checks svg{color:#3ddc84}
       <span class="glyph" aria-hidden="true"></span><span>Dues</span>
     </a>
     <div class="nav-links">
-      <a href="/pricing">Pricing</a>
       <a href="/discover">Discover</a>
-      <a href="/api/invite">Invite Dues &#8599;</a>
+      <a href="/pricing">Pricing</a>
+      <a href="/vs">Compare</a>
+      <a href="/tools">Tools</a>
     </div>
     <div class="nav-right">
       <button class="theme-btn" type="button" data-theme-toggle aria-label="Switch between day and night theme">
@@ -2451,7 +2491,7 @@ html:not([data-theme="light"]) .comm-checks svg{color:#3ddc84}
 
 
 <!-- 5.5 · payment methods -->
-<section class="pay">
+<section class="pay wrap">
   <p class="pay-cap">Payments run on Stripe</p>
   <div class="pay-chips" aria-label="Supported payment methods">
     <span class="pay-chip" aria-label="Visa"><b class="pm-visa">VISA</b></span>
@@ -2461,7 +2501,7 @@ html:not([data-theme="light"]) .comm-checks svg{color:#3ddc84}
     <span class="pay-chip" aria-label="Google Pay"><svg viewBox="0 0 18 18" aria-hidden="true"><path fill="#4285F4" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.92c1.7-1.57 2.68-3.88 2.68-6.62z"/><path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.92-2.26c-.8.54-1.84.86-3.04.86-2.34 0-4.32-1.58-5.03-3.7H.96v2.33A9 9 0 0 0 9 18z"/><path fill="#FBBC05" d="M3.97 10.72a5.41 5.41 0 0 1 0-3.44V4.95H.96a9 9 0 0 0 0 8.1l3.01-2.33z"/><path fill="#EA4335" d="M9 3.58c1.32 0 2.5.45 3.44 1.35l2.58-2.58C13.46.9 11.42 0 9 0A9 9 0 0 0 .96 4.95l3.01 2.33C4.68 5.16 6.66 3.58 9 3.58z"/></svg><b class="pm-ink">Pay</b></span>
     <span class="pay-chip pm-linkchip" aria-label="Link"><b>link</b></span>
     <span class="pay-chip pm-klarnachip" aria-label="Klarna"><b>Klarna.</b></span>
-    <span class="pay-chip pm-cashchip" aria-label="Cash App Pay"><svg viewBox="0 0 24 24" aria-hidden="true" fill="#fff"><path d="M16.19 7.06c.67.46 1.28 1 1.83 1.6a.66.66 0 0 0 .95.03l1.26-1.26a.68.68 0 0 0 0-.97 11.6 11.6 0 0 0-2.32-1.94l.5-2.01a.67.67 0 0 0-.65-.83h-2.44a.67.67 0 0 0-.65.51l-.33 1.32c-2.98-.6-6.09.35-6.7 3.42-.5 2.5 1.26 3.77 3.32 4.52 1.9.71 3.36 1.13 3.13 2.32-.2 1.03-1.44 1.55-3.16 1.28a7.3 7.3 0 0 1-2.98-1.36.67.67 0 0 0-.9.06l-1.32 1.35a.68.68 0 0 0 .03.98 9.6 9.6 0 0 0 2.66 1.68l-.5 2.05a.67.67 0 0 0 .66.82l2.45-.02c.31 0 .58-.21.65-.51l.33-1.33c3.58.62 6.43-.68 6.98-3.55.46-2.44-1.2-3.7-3.5-4.51-1.62-.6-2.99-1.03-2.79-2.16.2-1.12 1.77-1.36 3.49-.99z"/></svg><b class="pm-cash-ink">Cash&#8202;App</b></span>
+    <span class="pay-chip pm-cashchip" aria-label="Cash App Pay"><svg viewBox="0 0 24 24" aria-hidden="true" fill="#fff"><path d="M16.19 7.06c.67.46 1.28 1 1.83 1.6a.66.66 0 0 0 .95.03l1.26-1.26a.68.68 0 0 0 0-.97 11.6 11.6 0 0 0-2.32-1.94l.5-2.01a.67.67 0 0 0-.65-.83h-2.44a.67.67 0 0 0-.65.51l-.33 1.32c-2.98-.6-6.09.35-6.7 3.42-.5 2.5 1.26 3.77 3.32 4.52 1.9.71 3.36 1.13 3.13 2.32-.2 1.03-1.44 1.55-3.16 1.28a7.3 7.3 0 0 1-2.98-1.36.67.67 0 0 0-.9.06l-1.32 1.35a.68.68 0 0 0 .03.98 9.6 9.6 0 0 0 2.66 1.68l-.5 2.05a.67.67 0 0 0 .66.82l2.45-.02c.31 0 .58-.21.65-.51l.33-1.33c3.58.62 6.43-.68 6.98-3.55.46-2.44-1.2-3.7-3.5-4.51-1.62-.6-2.99-1.03-2.79-2.16.2-1.12 1.77-1.36 3.49-.99z"/></svg><b>Cash&#8202;App</b></span>
     <span class="pay-chip pay-xtra pm-paypalchip" aria-label="PayPal"><b><i class="pp1">Pay</i><i class="pp2">Pal</i></b></span>
     <span class="pay-chip pay-xtra pm-idealchip" aria-label="iDEAL"><b>iDEAL</b></span>
     <span class="pay-chip pay-xtra pm-mobilepaychip" aria-label="MobilePay"><b>MobilePay</b></span>
@@ -2629,7 +2669,7 @@ html:not([data-theme="light"]) .comm-checks svg{color:#3ddc84}
            the community server, not articles, so there is nothing to list. -->
       <div class="fcol">
         <b>Compare</b>
-        <a href="/vs/">All comparisons</a>
+        <a href="/vs">All comparisons</a>
         <a class="f-deep" href="/vs/whop">Dues vs Whop</a>
         <a class="f-deep" href="/vs/launchpass">Dues vs LaunchPass</a>
         <a class="f-deep" href="/vs/subscord">Dues vs Subscord</a>
@@ -2645,7 +2685,7 @@ html:not([data-theme="light"]) .comm-checks svg{color:#3ddc84}
       </div>
       <div class="fcol">
         <b>Guides</b>
-        <a href="/guides/">All guides</a>
+        <a href="/guides">All guides</a>
         <a class="f-deep" href="/guides/how-to-monetize-a-discord-server">Monetize a Discord server</a>
         <a class="f-deep" href="/guides/how-to-sell-discord-roles">Sell Discord roles</a>
         <a class="f-deep" href="/guides/discord-paywall">Put up a paywall</a>
@@ -2658,7 +2698,7 @@ html:not([data-theme="light"]) .comm-checks svg{color:#3ddc84}
       </div>
       <div class="fcol">
         <b>Use cases</b>
-        <a href="/use-cases/">All use cases</a>
+        <a href="/use-cases">All use cases</a>
         <a class="f-deep" href="/use-cases/trading">Trading</a>
         <a class="f-deep" href="/use-cases/sports-betting">Sports picks</a>
         <a class="f-deep" href="/use-cases/reselling">Cook groups</a>
@@ -2668,7 +2708,7 @@ html:not([data-theme="light"]) .comm-checks svg{color:#3ddc84}
       </div>
       <div class="fcol">
         <b>Fee calculators</b>
-        <a href="/tools/">All calculators</a>
+        <a href="/tools">All calculators</a>
         <a class="f-deep" href="/tools/discord-fee-calculator">Compare every platform</a>
         <a class="f-deep" href="/tools/whop-fee-calculator">Whop fees</a>
         <a class="f-deep" href="/tools/launchpass-fee-calculator">LaunchPass fees</a>
@@ -2677,7 +2717,7 @@ html:not([data-theme="light"]) .comm-checks svg{color:#3ddc84}
       </div>
       <div class="fcol">
         <b>Alternatives</b>
-        <a href="/alternatives/">All alternatives</a>
+        <a href="/alternatives">All alternatives</a>
         <a class="f-deep" href="/alternatives/whop-alternatives">Whop alternatives</a>
         <a class="f-deep" href="/alternatives/launchpass-alternatives">LaunchPass alternatives</a>
         <a class="f-deep" href="/alternatives/patreon-alternatives-for-discord">Patreon alternatives</a>
@@ -2706,7 +2746,7 @@ html:not([data-theme="light"]) .comm-checks svg{color:#3ddc84}
   </div>
 </footer>
 
-<script src="/sky.js?v=197" defer></script>
+<script src="/sky.js?v=198" defer></script>
 <script>
 (function(){
   'use strict';
@@ -2717,11 +2757,13 @@ html:not([data-theme="light"]) .comm-checks svg{color:#3ddc84}
   var tintFrame = 0;
   // Read from the stylesheet's own tokens rather than repeating their values
   // here, so the tag a browser reads and the colour the page paints cannot
-  // drift apart. --ui-tint is the sky; --foot-end is the colour the footer
-  // gradient finishes on, and it is what the bottom of the screen must report
-  // once the footer owns it. iOS uses ONE theme-color for the strips at both
-  // ends of the window, and by the time the footer is on screen it is the only
-  // thing on screen, so following it is right at both ends.
+  // drift apart. --ui-tint is the sky; --foot-edge is the colour the footer is
+  // SEEN to finish on — its last gradient stop composited with the .footer::after
+  // shade, not the nominal stop --foot-end, which is what leaves a seam — and it
+  // is what the bottom of the screen must report once the footer owns it. iOS
+  // uses ONE theme-color for the strips at both ends of the window, and by the
+  // time the footer is on screen it is the only thing on screen, so following
+  // it is right at both ends.
   var tintWant = function(){
     var d = document.documentElement;
     var css = getComputedStyle(d);
@@ -3078,15 +3120,6 @@ html:not([data-theme="light"]) .comm-checks svg{color:#3ddc84}
   // to the viewport that the old innerHeight-based check could flip mid-
   // gesture and reflow the footer under the visitor's thumb. Falls back to
   // innerHeight where lvh is unsupported (the probe measures 0).
-  // svh, NOT lvh. This is the whole bug in one unit. 100lvh is the viewport
-  // with iOS Safari's toolbars COLLAPSED — the most generous number the device
-  // will ever report. The reveal, though, happens while someone is scrolling,
-  // which is exactly when the toolbars are SHOWING and the usable height is
-  // ~90px smaller. Measuring the fit against lvh armed the blind for a footer
-  // that then could not fit on screen: it pinned, and its top sat above the
-  // visible area, so the reveal never completed. It worked in every desktop
-  // emulator, where lvh and svh are the same number, and only ever failed on a
-  // real phone.
   // ONE probe, read in two units, because the fit needs both and they are the
   // same number in every desktop engine — which is exactly why this kept
   // passing a check and failing a phone. 100lvh is the viewport with iOS
