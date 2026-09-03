@@ -9,6 +9,7 @@ import { getUserGuilds, getGuild, getGuildRoles, getBotUser, getGuildMember, get
 import { CHECKOUT_TTL_SECONDS, stripeFetch, createWebhookEndpoint, canonicalWebhookUrl, invalidatePriceCache, isStripeKey, stripeKeyMode } from '../src/lib/stripe.js';
 import { managedStoreByGuild, storeBySlug, slugify, isReservedSlug, plansOf, rebaseImageUrl } from '../src/services/stores.js';
 import { parseUploadDataUrl, UPLOAD_BODY_LIMIT } from '../src/lib/upload.js';
+import { validatePlanLook } from '../src/lib/theme.js';
 import { validateAmount, roundAmount, toMinor, formatAmount, minCharge, maxCharge, normalize as normalizeCurrency } from '../src/lib/currency.js';
 
 const ADMINISTRATOR = 1n << 3n;
@@ -112,7 +113,14 @@ export default guard(async function handler(req, res) {
         return sendJson(res, 400, { error: 'Stripe rejected that key. Create one under Stripe → Developers → API keys — a restricted key needs the permissions listed above.' });
       }
       if (existingStore) {
-        await db.updateStore(existingStore.id, { stripeSecretEnc: sealSecret(stripeKey) });
+        // stripeAccountId is which BUSINESS this store is — it groups stores
+        // that settle to one Stripe account into one plan, whoever owns the
+        // Discord accounts (src/services/billing.js). The /v1/account call
+        // above already fetched it to validate the key.
+        await db.updateStore(existingStore.id, {
+          stripeSecretEnc: sealSecret(stripeKey),
+          stripeAccountId: account?.id ? String(account.id) : null,
+        });
         // A key re-entered on an existing store revokes every other session
         // (see api/admin/store.js); the caller's own cookie is re-issued.
         res.setHeader('set-cookie', createSessionCookie(uid, await revokeAllSessions(uid)));
@@ -144,6 +152,8 @@ export default guard(async function handler(req, res) {
         stripeSecretEnc: sealSecret(stripeKey),
         status: 'draft',
       });
+      // Which business this new store is — see the update path above.
+      await db.updateStore(row.id, { stripeAccountId: account?.id ? String(account.id) : null }).catch(() => {});
 
       // Register this store's own webhook endpoint on THEIR Stripe account;
       // its signing secret verifies every delivery for this store.
@@ -544,6 +554,27 @@ export default guard(async function handler(req, res) {
           fields.requiredRoleId = role.id;
           fields.requiredRoleName = `@${role.name}`;
         }
+      }
+      // This product's OWN LOOK — any theme token the store itself can set:
+      // colours, corners, type, material, wallpaper. Validated by the same code
+      // the store's theme goes through (validatePlanLook delegates to
+      // validateTheme), so there is one whitelist, one preset catalogue and one
+      // URL gate for both. null clears it and the product goes back to wearing
+      // the store's, token for token.
+      //
+      // The column is still called `bg` because a wallpaper was all it held
+      // first; the name is historical, the shape is not (src/lib/theme.js).
+      if (body.bg !== undefined) {
+        if (existing.variantOf) {
+          return sendJson(res, 400, { error: 'Options share their product\u2019s page \u2014 set the look on the product itself.' });
+        }
+        let bg;
+        try {
+          bg = validatePlanLook(body.bg);
+        } catch (err) {
+          return sendJson(res, 400, { error: err.message });
+        }
+        fields.bg = bg ? JSON.stringify(bg) : null;
       }
       if (body.priceUsd !== undefined) {
         const currency = normalizeCurrency(existing.currency);

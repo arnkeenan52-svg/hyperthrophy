@@ -54,8 +54,8 @@ export const THEME_KEYS = ['bg', 'panel', 'text', 'accent', 'pay', 'radius', 'fo
 // local photo layer.
 export const BG_PRESETS = {
   // clouds — the brand sky, drifting live
-  'clouds-day': { tone: 'light', live: true, label: 'Clouds · day' },
-  'clouds-night': { tone: 'dark', live: true, label: 'Clouds · night' },
+  'clouds-day': { tone: 'light', live: true, still: '/sky-day-tall.jpg', label: 'Clouds · day' },
+  'clouds-night': { tone: 'dark', live: true, still: '/sky-night-tall.jpg', label: 'Clouds · night' },
   // stills of the same sky
   'sky-day': { tone: 'light', img: '/sky-day-tall.jpg', label: 'Sky photo · day' },
   'sky-night': { tone: 'dark', img: '/sky-night-tall.jpg', label: 'Sky photo · night' },
@@ -148,6 +148,48 @@ export function validateTheme(input) {
   return Object.keys(out).length ? out : null;
 }
 
+// A PRODUCT's OWN LOOK — its overrides of the store's theme.
+//
+// It began as a wallpaper and only a wallpaper, which is why the column that
+// holds it is still called `bg`; the name is historical and the shape is not.
+// A product may now override any theme token the store itself can set — its
+// colours, its corners, its type, its material, its wallpaper — because a
+// seller with a Starter tier and a Lifetime tier wants them to LOOK different,
+// and "one look for the store and every product in it" made the store page and
+// every product page the same page in different words.
+//
+// Nothing is re-decided here: the object is handed to validateTheme above, so
+// the token whitelist, the preset catalogue and validateBgUrl are all still
+// the only gates. Keys outside the set are dropped, and a value that means
+// "no override" comes back null, which is what clears the column.
+export function validatePlanLook(input) {
+  if (input === null || input === undefined) return null;
+  if (typeof input !== 'object' || Array.isArray(input)) throw new Error('a product look must be an object');
+  return validateTheme(input);
+}
+
+// The inheritance rule, in one place, so every surface agrees on it: a product
+// wears the STORE's look and replaces only the parts it sets for itself. A
+// product carrying no look of its own gets the store's theme back untouched —
+// that is the whole of "inherits", and it is why nothing here invents a value.
+//
+// The one rule that is not a plain merge: if the product sets EITHER background
+// key, both of the store's are cleared before the product's is applied. bgLayer
+// gives an imported URL priority over a preset, so a store with an imported
+// image and a product with a chosen preset would otherwise render the store's
+// image on the product's page.
+export function themeWithLook(theme, look) {
+  const keys = look ? Object.keys(look).filter((k) => look[k] !== null && look[k] !== undefined && look[k] !== '') : [];
+  if (!keys.length) return theme ?? null;
+  const out = { ...(theme ?? {}) };
+  if (look.bgPreset || look.bgUrl) {
+    delete out.bgPreset;
+    delete out.bgUrl;
+  }
+  for (const k of keys) out[k] = look[k];
+  return out;
+}
+
 // An owner-imported background: a GIF, image, or MP4/WebM the owner hosts.
 // Never reaches CSS (no url() injection surface) — it renders as a media
 // ELEMENT with an escaped attribute. https only, a real parseable URL, and a
@@ -194,7 +236,12 @@ const escAttr = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<':
 //   bodyAttrs — attributes for the <body> tag (bg id + material)
 //   lightTone — flip the page onto the light token set
 //   needsSky — mount /sky.js (live cloud presets)
-export function bgLayer(theme) {
+// `still` swaps the live cloud shader for the photograph of the same sky.
+// /sky.js drives the canvases it finds when it loads, so a layer built after
+// that — a product card, a checkout the storefront swaps in without a page
+// load — would get an empty canvas and a bare gradient. The still is the same
+// picture, held.
+export function bgLayer(theme, { still = false } = {}) {
   const t = theme ?? {};
   const custom = t.bgUrl ?? null;
   const preset = !custom && t.bgPreset ? t.bgPreset : null;
@@ -220,7 +267,7 @@ export function bgLayer(theme) {
       ? `<video src="${escAttr(custom)}" autoplay muted loop playsinline disablepictureinpicture referrerpolicy="no-referrer" aria-hidden="true"></video>`
       : `<img src="${escAttr(custom)}" alt="" aria-hidden="true" referrerpolicy="no-referrer" />`;
   } else if (def.live) {
-    inner = '<canvas data-dues-sky></canvas>';
+    inner = still ? `<img src="${escAttr(def.still)}" alt="" aria-hidden="true" />` : '<canvas data-dues-sky></canvas>';
   } else if (def.img) {
     inner = `<img src="${escAttr(def.img)}" alt="" aria-hidden="true" />`;
   } else {
@@ -229,10 +276,18 @@ export function bgLayer(theme) {
   }
   const material = t.material ?? 'glass';
   return {
+    // id, material and inner ride along so a caller that is not writing an
+    // HTML document — the storefront swapping one product's wallpaper in,
+    // or painting one behind a product card — can build the layer's own
+    // wrapper element and drop `inner` into it, without parsing bodyAttrs
+    // back apart and without a second copy of the media decision.
+    id,
+    material,
+    inner,
     markup: `<div class="store-bg" data-bg="${escAttr(id)}" aria-hidden="true">${inner}</div>`,
     bodyAttrs: ` class="has-bg" data-bg="${escAttr(id)}" data-material="${escAttr(material)}"`,
     lightTone: Boolean(def?.tone === 'light'),
-    needsSky: Boolean(def?.live),
+    needsSky: Boolean(def?.live && !still),
   };
 }
 

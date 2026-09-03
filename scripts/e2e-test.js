@@ -46,6 +46,7 @@ const G3 = '900000000000000003';           // third guild — draft-store slug-g
 const G4 = '900000000000000004';           // fourth guild — the multi-currency store, owned by nothing else
 const R2_VIP = '2200000000000000101';      // grantable role in G2
 const R2_BOT = '2200000000000000999';      // the bot's role in G2
+const G_SPLIT = '900000000000000901';  // a second server, second Discord account, SAME Stripe account
 const OWNER2_KEY = 'rk_test_owner2';       // second owner's own Stripe key — restricted, the kind Stripe recommends
 const RESEND_KEY = 're_e2e_1234567890';
 const COMMUNITY_INVITE = 'https://discord.gg/e2e-community'; // one setting; these are its request-time readers (site hop + receipt footer)
@@ -80,6 +81,12 @@ const discord = {
     code_u1: { id: U1, username: 'trader_one' },
     code_u3: { id: U3, username: 'trader_three' },
   },
+  // MEMBER_ROLE_UPDATE entries, newest first — the shape Discord returns from
+  // GET /guilds/:id/audit-logs. The comp audit reads this to find roles a
+  // human handed out (src/services/comp-audit.js).
+  auditLog: [],                 // { id, target_id, user_id, changes:[{key,new_value}] }
+  auditBlockedGuilds: new Set(),// guilds whose audit log answers 403 (no View Audit Log)
+  auditQueries: [],             // { guildId, after, actionType } — what was actually asked
 };
 // The bot itself is a guild member holding its own role.
 discord.members.set(BOT_ID, new Set([R_BOT]));
@@ -202,6 +209,34 @@ async function discordHandler(req, res) {
   const url = new URL(req.url, 'http://mock');
   const p = url.pathname;
   let m;
+
+  // GET /guilds/:id/audit-logs — the comp audit's only window onto roles a
+  // human handed out. Real Discord returns entries NEWEST FIRST and refuses
+  // with 403 when the bot lacks View Audit Log, so the mock does both.
+  // Placed above the kicked-guild block, so it answers for that case itself.
+  if ((m = p.match(/^\/guilds\/([^/]+)\/audit-logs$/)) && req.method === 'GET') {
+    const guildId = m[1];
+    const after = url.searchParams.get('after');
+    discord.auditQueries.push({ guildId, after, actionType: url.searchParams.get('action_type') });
+    // A guild the bot is no longer in answers Unknown Guild here too — the
+    // route sits above the kicked-guild catch-all, so it has to say so itself.
+    if (discord.kickedFrom && guildId === discord.kickedFrom) {
+      json(res, 404, { message: 'Unknown Guild', code: 10004 });
+      return;
+    }
+    if (discord.auditBlockedGuilds.has(guildId)) {
+      json(res, 403, { message: 'Missing Permissions', code: 50013 });
+      return;
+    }
+    const limit = Math.min(Number(url.searchParams.get('limit') ?? 50), 100);
+    const all = discord.auditLog
+      .filter((e) => String(e.guild_id ?? guildId) === String(guildId))
+      .filter((e) => (after ? BigInt(e.id) > BigInt(after) : true))
+      .sort((a, b) => (BigInt(b.id) > BigInt(a.id) ? 1 : -1))
+      .slice(0, limit);
+    json(res, 200, { audit_log_entries: all, users: [] });
+    return;
+  }
 
   // The bot was kicked from this guild (or the server was deleted): Discord
   // answers 404 Unknown Guild (10004) on its guild routes and 403 Missing
@@ -372,6 +407,13 @@ async function discordHandler(req, res) {
     }
     if (m[1] === G3) {
       json(res, 200, { id: G3, name: 'Trade Hub', icon: null });
+      return;
+    }
+    // The second server of a seller splitting across two Discord accounts —
+    // the store there settles to the SAME Stripe account, which is what the
+    // billing group is keyed on (src/services/billing.js).
+    if (m[1] === G_SPLIT) {
+      json(res, 200, { id: G_SPLIT, name: 'Second Server', icon: null });
       return;
     }
     if (m[1] === G4) {
@@ -1155,7 +1197,12 @@ test('storefront serves the tenant-generic checkout, plans API exposes capabilit
   // what the seller stored and what every older reader expects, the roles are
   // what the guild says those ids ARE right now — live name, live colour — so
   // the storefront can draw a role as a role instead of as two grey letters.
-  assert.deepEqual(Object.keys(plans[0]).sort(), ['currency', 'description', 'descriptionHighlight', 'durationDays', 'expiresAt', 'id', 'imageUrl', 'interval', 'lifetime', 'linkSlug', 'mediaKind', 'name', 'priceUsd', 'requiredRoleName', 'roleNames', 'roles', 'variantOf']);
+  // `bgView` is this product's OWN LOOK, already rendered to the layer the
+  // page would carry, or null when it wears the store's. It is built on the
+  // server by the same bgLayer() that writes the server-rendered page, so a
+  // product card and the product's own link cannot drift — there is no second
+  // copy of that decision in the browser (api/plans.js, src/lib/theme.js).
+  assert.deepEqual(Object.keys(plans[0]).sort(), ['bgView', 'currency', 'description', 'descriptionHighlight', 'durationDays', 'expiresAt', 'id', 'imageUrl', 'interval', 'lifetime', 'linkSlug', 'mediaKind', 'name', 'priceUsd', 'requiredRoleName', 'roleNames', 'roles', 'variantOf']);
   assert.equal(plans[0].currency, 'usd', 'a store that never picked a currency prices in USD, exactly as before');
 });
 
@@ -1899,7 +1946,24 @@ test('dashboard: MRR is a monthly rate, a flat product reads flat, and the black
 
   // Saving the storefront or dashboard appearance re-renders to a screen that
   // looks exactly like the one before the click; each says it landed.
-  assert.match(dash, /theme: read\(\) \}\);\n\s+state\.data = null;\n\s+await viewStore\(slug\);\n\s+flashSaved\('#th-note'\)/, 'Save appearance confirms into #th-note');
+  // Two assertions rather than one shape-matched block: the save handler
+  // BRANCHES now (a product's own look, or the store's whole theme), so a
+  // regex spanning from `theme: read()` to `flashSaved` was pinning the brace
+  // layout between them rather than the behaviour on either side of it.
+  assert.match(dash, /theme: read\(\) \}\);/, 'Save appearance posts the store theme');
+  assert.match(dash, /await viewStore\(slug\);\s*\n\s*flashSaved\('#th-note'\)/,
+    'and confirms into #th-note after the re-render');
+
+  // PER-PRODUCT LOOKS. A product may override any theme token, and the save
+  // sends only what actually differs from the store — sending the full set
+  // would work and would be wrong, because the product would silently stop
+  // following the store for every token somebody had never touched.
+  assert.match(dash, /String\(v\) !== String\(storeLook\[k\] \?\? ''\)/,
+    'a product stores only the tokens that differ from its store');
+  assert.match(dash, /bg: Object\.keys\(look\)\.length \? look : null/,
+    'and a product that overrides nothing is stored as null, which is what inherits');
+  assert.doesNotMatch(dash, /th-store-only/,
+    'no appearance block is store-only any more — every one of them is per-target');
   assert.match(dash, /dashboardPrefs: prefsBody \}\);\n\s+state\.data = null;\n\s+await viewStore\(slug\);\n\s+flashSaved\('#dc-ok'\)/, 'Customize save confirms into #dc-ok');
   assert.match(dash, /id="dc-ok" role="status"/, 'and the slot exists in the Customize foot');
   // The 320px billing card: the interval toggle wraps rather than slicing the
@@ -4534,9 +4598,17 @@ test('SEO reach pages serve: /vs, /tools, /use-cases, sitemap and robots', async
   assert.ok(invUrl.searchParams.get('client_id'), 'client id rides the invite link');
   // Exact permission set, so it can't silently drift again: Manage Roles +
   // Manage Server + Create Instant Invite (guilds.join needs it) +
-  // View/Send/Embed for sale notifications. Never Administrator (bit 3).
+  // View/Send/Embed for sale notifications + View Audit Log. Never
+  // Administrator (bit 3).
+  //
+  // View Audit Log (bit 7) is what lets the comp audit see a role handed out
+  // by hand — the plan meters those people, and reading the audit log is how
+  // they are found (src/services/comp-audit.js). The alternative, listing the
+  // guild's members, needs the PRIVILEGED GuildMembers intent, which Discord
+  // approves per application and gates behind bot verification past 100
+  // servers. An ordinary permission in the invite beats a product dependency.
   const perms = BigInt(invUrl.searchParams.get('permissions'));
-  assert.equal(perms, 268435456n + 32n + 1n + 1024n + 2048n + 16384n);
+  assert.equal(perms, 268435456n + 128n + 32n + 1n + 1024n + 2048n + 16384n);
   assert.equal(perms & 8n, 0n, 'the invite never asks for Administrator');
   const homeHtml = await (await fetch(`${appUrl}/`)).text();
   assert.match(homeHtml, /href="\/api\/invite"/, 'the hero links the invite');
@@ -5264,6 +5336,39 @@ test('products managed in-site: edit/toggle/limit/success-url/lazy price/discoun
   assert.match(salePost.body.embeds[0].title, /New Subscriber/, 'every order posts to the sales channel');
   assert.match(salePost.body.embeds[0].description, /just subscribed to \*\*VIP Access\*\*/, 'the ping names the product');
   assert.match(salePost.body.embeds[0].description, /Payment received: \*\*\$47\.99\*\*/, 'the ping carries the discounted charge, not the list price');
+  // ONE SALE, ONE PING — even when Stripe delivers the same session twice.
+  //
+  // A store registered on its own endpoint while a platform-level endpoint is
+  // still live gets every event on BOTH, and the webhook claim is per-endpoint
+  // on purpose, so both deliveries run. The "already completed" guard is a
+  // check-then-act and two deliveries at the same instant both read the
+  // attempt before either marks it — which is how a seller ended up with two
+  // "New Subscriber!" embeds for one sale. Delivered concurrently here,
+  // because delivering them in sequence is the case that already worked.
+  const pingsBefore = discord.channelPosts.length;
+  const dupe = {
+    id: 'evt_disc_1_again',
+    type: 'checkout.session.completed',
+    data: { object: { id: 'cs_disc_dupe', mode: 'payment', payment_status: 'paid', amount_total: 4799, client_reference_id: '509900000000000009', customer_details: { email: 'buyer9@e2e.test' }, metadata: { plan_id: vip.planKey, discord_id: '509900000000000009', store_id: String(storeId) } } },
+  };
+  // The tenant endpoint verifies against the STORE's own secret — signing it
+  // with the platform's is a 400 and would have this test proving nothing.
+  const dupeStore = { ...dupe, id: 'evt_disc_1_again_store' };
+  // Every endpoint the mock auto-registers hands back the same secret, which
+  // is what the app stored for this store when it registered.
+  const dupeStorePayload = JSON.stringify(dupeStore);
+  const both = await Promise.all([
+    deliverStripe(dupe, { path: '/webhooks/stripe' }),
+    deliverStripe(dupeStore, {
+      path: `/webhooks/stripe/${storeId}`,
+      header: signStripe(dupeStorePayload, nowSec(), AUTO_ENDPOINT_SECRET),
+    }),
+  ]);
+  assert.deepEqual(both.map((r) => r.status), [200, 200], `both endpoints must accept the delivery: ${JSON.stringify(both)}`);
+  await waitFor('the duplicate delivery settles', async () => discord.channelPosts.length >= pingsBefore + 1);
+  assert.equal(discord.channelPosts.length, pingsBefore + 1,
+    'one session pings once, however many endpoints Stripe delivers it to');
+
   // The emailed receipt shows the same real amount.
   const discReceipt = resend.emails.at(-1);
   assert.ok(discReceipt, 'a discounted order still sends a receipt');
@@ -9219,6 +9324,120 @@ test('session revocation: a revoke on another instance stops writes here at once
   assert.equal(rotate.status, 401, 'a mutating admin call re-reads the generation and refuses the revoked cookie');
   assert.deepEqual(rotate.headers.getSetCookie().filter((c) => c.startsWith('tl_session=')), [], 'and mints no replacement cookie');
   assert.equal((await fetch(`${appUrl}/api/auth/logout-all`, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: '{}' })).status, 401, 'nor can it revoke again from a stale cache');
+});
+
+test('a role handed out by hand counts against the plan, and one Stripe account is one plan', async () => {
+  // THE TWO WAYS ROUND A PLAN, both closed here.
+  //
+  // One: hand the role over in Discord and never let the buyer check out, so
+  // no `subscriptions` row exists and the member count never moves. Read from
+  // the guild's audit log (action type 25), which needs only View Audit Log
+  // and not the privileged GUILD_MEMBERS intent.
+  //
+  // Two: a second Discord account owning a second store, splitting the members
+  // across two free tiers. Grouped on the Stripe account the money settles to,
+  // because that is the one thing a second identity cannot cheaply duplicate.
+  const { rows: [store] } = await tq(
+    "SELECT id, guild_id, owner_discord_id, stripe_account_id FROM stores WHERE slug = 'vip-signals'",
+  );
+  assert.ok(store, 'the billing scenario left vip-signals behind to measure');
+  const { rows: [plan] } = await tq('SELECT role_ids FROM store_plans WHERE store_id = ? LIMIT 1', [store.id]);
+  const soldRole = String(JSON.parse(plan.role_ids)[0]);
+
+  // The key was saved through the API, so the acct_ id came back from the same
+  // /v1/account call that validated it — nothing to backfill.
+  assert.equal(store.stripe_account_id, 'acct_owner2',
+    'saving a Stripe key records which business the store is');
+
+  const ownerCookie = await signInAs('code_vipowner', String(store.owner_discord_id), 'vip_owner');
+  const usage = async () => (await (await fetch(`${appUrl}/api/billing`, { headers: { cookie: ownerCookie } })).json()).usage.members;
+  const before = await usage();
+
+  // A HUMAN hands the role over. entry ids are snowflakes, so they must sort
+  // numerically — the cursor compares them as BigInt, not as strings.
+  const FREELOADER = '540000000000000001';
+  const HUMAN = String(store.owner_discord_id);
+  discord.auditLog.push({
+    id: '900000000000000100',
+    guild_id: String(store.guild_id),
+    target_id: FREELOADER,
+    user_id: HUMAN,
+    changes: [{ key: '$add', new_value: [{ id: soldRole, name: 'PREMIUM' }] }],
+  });
+  assert.equal((await hitCron()).status, 200);
+  assert.equal(await usage(), before + 1,
+    'a role handed out by hand is a member the plan pays for');
+
+  // The BOT's own grants are not comps: every paid member would otherwise be
+  // counted twice the moment their role landed.
+  const PAID = '540000000000000002';
+  discord.auditLog.push({
+    id: '900000000000000101',
+    guild_id: String(store.guild_id),
+    target_id: PAID,
+    user_id: BOT_ID,
+    changes: [{ key: '$add', new_value: [{ id: soldRole, name: 'PREMIUM' }] }],
+  });
+  assert.equal((await hitCron()).status, 200);
+  assert.equal(await usage(), before + 1, "Dues' own grants are not comps");
+
+  // And the cursor moved: the second run asked for entries AFTER the first
+  // run's newest, rather than re-reading the page every hour.
+  const asked = discord.auditQueries.filter((a) => a.guildId === String(store.guild_id));
+  assert.ok(asked.length >= 2 && asked.at(-1).after, 'the audit reads forward from a stored cursor');
+  assert.equal(asked.at(-1).actionType, '25', 'and asks Discord only for role changes');
+
+  // Taking the role back takes the seat back with it.
+  discord.auditLog.push({
+    id: '900000000000000102',
+    guild_id: String(store.guild_id),
+    target_id: FREELOADER,
+    user_id: HUMAN,
+    changes: [{ key: '$remove', new_value: [{ id: soldRole, name: 'PREMIUM' }] }],
+  });
+  assert.equal((await hitCron()).status, 200);
+  assert.equal(await usage(), before, 'and giving it back gives the seat back');
+
+  // A bot invited before View Audit Log was in the invite: recorded as a state
+  // the seller can be told about, never a crash and never a silent zero.
+  discord.auditBlockedGuilds.add(String(store.guild_id));
+  await tq('UPDATE stores SET audit_checked_at = 0 WHERE id = ?', [store.id]);
+  assert.equal((await hitCron()).status, 200, 'a guild that refuses its audit log does not fail the sweep');
+  const { rows: [blockedRow] } = await tq('SELECT audit_blocked FROM stores WHERE id = ?', [store.id]);
+  assert.equal(Number(blockedRow.audit_blocked), 1, 'and the store is flagged so the seller can re-invite the bot');
+  discord.auditBlockedGuilds.delete(String(store.guild_id));
+
+  // ONE STRIPE ACCOUNT, ONE PLAN. A second Discord account, a second server, a
+  // second store — settling to the same acct_e2e. Its members join the first
+  // owner's count instead of getting a free tier of their own.
+  const SPLIT_OWNER = '540000000000000009';
+  discord.userGuilds[SPLIT_OWNER] = [{ id: G_SPLIT, name: 'Second Server', owner: true, permissions: '8' }];
+  const splitCookie = await signInAs('code_splitowner', SPLIT_OWNER, 'split_owner');
+  const made = await fetch(`${appUrl}/api/onboard`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', cookie: splitCookie },
+    // The SAME key as vip-signals: one Stripe account, so one business, so
+    // one plan — whatever Discord thinks about the two owners.
+    body: JSON.stringify({ step: 'store', guildId: G_SPLIT, name: 'Second Shop', stripeKey: OWNER2_KEY }),
+  });
+  assert.equal(made.status, 200, `the split store is created: ${await made.text()}`);
+  const { rows: [split] } = await tq('SELECT id, stripe_account_id FROM stores WHERE owner_discord_id = ?', [SPLIT_OWNER]);
+  assert.equal(split.stripe_account_id, 'acct_owner2', 'the second store settles to the same business');
+
+  // A member of the SECOND store, counted against the FIRST owner's plan.
+  const SHARED_MEMBER = '540000000000000010';
+  await tq(
+    `INSERT INTO subscriptions (discord_id, store_id, plan_id, status, provider, provider_ref, current_period_end, created_at, updated_at)
+     VALUES (?, ?, 'vip', 'active', 'stripe', 'sub_split_1', ?, ?, ?)`,
+    [SHARED_MEMBER, split.id, Math.floor(Date.now() / 1000) + 86400, Math.floor(Date.now() / 1000), Math.floor(Date.now() / 1000)],
+  );
+  assert.equal(await usage(), before + 1,
+    'a member of a second store on the same Stripe account counts against the same plan');
+
+  // And it is ONE bill, not two: the group's ceiling is the best tier anybody
+  // in it holds, so a second account never has to buy a second plan.
+  const splitUsage = (await (await fetch(`${appUrl}/api/billing`, { headers: { cookie: splitCookie } })).json()).usage.members;
+  assert.equal(splitUsage, before + 1, 'both owners see the one shared number, not two half-counts');
 });
 
 async function main() {
